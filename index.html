@@ -200,7 +200,7 @@
 <header class="top">
   <div class="top-in">
     <a class="brand" href="#/"><b>GH</b> 학교 설문</a>
-    <button id="installBtn" class="pill blue" hidden>⬇ 앱 설치</button>
+    <button id="installBtn" class="pill blue" hidden>⬇ 바로가기 설치</button>
     <a id="meBtn" class="pill" href="#/me" hidden></a>
   </div>
 </header>
@@ -814,21 +814,65 @@ function showQR(s) {
 (function installSetup() {
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('./service-worker.js').catch(() => {});
   const btn = $('#installBtn');
-  const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  const ua = navigator.userAgent;
+  const isIOS = /iphone|ipad|ipod/i.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const isAndroid = /android/i.test(ua);
+  const isEdge = /Edg\//.test(ua);
   const installed = matchMedia('(display-mode: standalone)').matches || navigator.standalone;
   let ev = null;
-  if (installed) return;
-  if (isIOS) btn.hidden = false;
-  addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); ev = e; btn.hidden = false; });
-  addEventListener('appinstalled', () => (btn.hidden = true));
-  btn.onclick = async () => {
-    if (ev) { ev.prompt(); await ev.userChoice; ev = null; btn.hidden = true; return; }
+  if (installed) return;                  // 이미 앱으로 실행 중이면 버튼 숨김
+  btn.hidden = false;                     // 학교 사이트처럼 항상 보이게
+  addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault(); ev = e;
+    const gi = document.getElementById('guideInstall');   // 안내창이 열려 있으면 바로 설치 버튼으로 바꿔줌
+    if (gi) gi.hidden = false;
+  });
+  addEventListener('appinstalled', () => { btn.hidden = true; toast('설치했어요! 바탕화면이나 홈 화면에서 열 수 있어요.', 4000); });
+
+  function guide() {
+    let title, steps;
+    if (IN_APP) {
+      title = '다른 브라우저로 열어주세요';
+      steps = ['카카오톡·인스타그램 안에서는 설치가 안 돼요.', '오른쪽 위 메뉴(⋮ 또는 …)에서 <b>다른 브라우저로 열기</b>를 누른 뒤 다시 설치해주세요.'];
+    } else if (isIOS) {
+      title = '아이폰에 설치하기';
+      steps = ['<b>사파리</b>로 이 사이트를 열어주세요.', '아래쪽 <b>공유 버튼(□↑)</b>을 누르세요.', '<b>홈 화면에 추가</b>를 누르세요.'];
+    } else if (isAndroid) {
+      title = '안드로이드에 설치하기';
+      steps = ['오른쪽 위 <b>⋮ 메뉴</b>를 누르세요. (삼성 인터넷은 아래쪽 <b>≡ 메뉴</b>)', '<b>앱 설치</b> 또는 <b>홈 화면에 추가</b>를 누르세요.', '크롬은 사이트를 처음 열면 잠깐(약 30초) 둘러봐야 바로 설치 창을 띄워줘요. 조금 뒤에 다시 눌러봐도 돼요.'];
+    } else if (isEdge) {
+      title = 'PC에 설치하기 (엣지)';
+      steps = ['주소창 오른쪽의 <b>앱 설치 아이콘(⊞)</b>을 누르세요.', '안 보이면 오른쪽 위 <b>…</b> → <b>앱</b> → <b>이 사이트를 앱으로 설치</b>를 누르세요.'];
+    } else {
+      title = 'PC에 설치하기 (크롬)';
+      steps = ['주소창 오른쪽의 <b>설치 아이콘(모니터에 ↓)</b>을 누르세요.', '안 보이면 오른쪽 위 <b>⋮</b> → <b>전송, 저장, 공유</b> → <b>페이지를 앱으로 설치</b>를 누르세요.', '시크릿 창에서는 설치가 안 돼요.'];
+    }
     const m = $('#modal');
-    m.innerHTML = `<div class="modal-box" role="dialog" aria-label="아이폰 설치 방법" style="text-align:left">
-      <h2>아이폰에 설치하기</h2>
-      <p>1. 사파리 아래쪽의 공유 버튼(□↑)을 누르세요.<br>2. "홈 화면에 추가"를 누르세요.</p>
-      <button class="btn primary full" id="iosOk">확인</button></div>`;
-    m.hidden = false; $('#iosOk').onclick = () => (m.hidden = true);
+    m.innerHTML = `<div class="modal-box" role="dialog" aria-label="${title}" style="text-align:left">
+      <h2>${title}</h2>
+      <ol style="padding-left:20px;line-height:1.8;margin:12px 0 16px">${steps.map((s) => `<li>${s}</li>`).join('')}</ol>
+      <button class="btn primary full" id="guideInstall" hidden style="margin-bottom:8px">지금 바로 설치</button>
+      <button class="btn soft full" id="guideOk">확인</button></div>`;
+    m.hidden = false;
+    $('#guideOk').onclick = () => (m.hidden = true);
+    $('#guideInstall').onclick = () => { m.hidden = true; install(); };
+    m.onclick = (e) => { if (e.target === m) m.hidden = true; };
+  }
+
+  async function install() {
+    const e = ev; ev = null;
+    e.prompt();
+    const { outcome } = await e.userChoice;
+    if (outcome === 'accepted') btn.hidden = true;
+  }
+  btn.onclick = async () => {
+    if (!ev && !isIOS && !IN_APP) {         // 브라우저가 아직 준비 중이면 잠깐 기다려봄
+      btn.disabled = true;
+      for (let i = 0; i < 15 && !ev; i++) await new Promise((r) => setTimeout(r, 100));
+      btn.disabled = false;
+    }
+    if (ev) return install();              // 크롬·엣지·안드로이드: 바로 설치 창
+    guide();                               // 그 외: 설치 방법 안내
   };
 })();
 
