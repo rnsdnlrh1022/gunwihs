@@ -2,16 +2,29 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // 학생 정보: 본인만 읽고 쓸 수 있음 (전화번호는 다른 사람에게 절대 안 보임)
+    // 학생 정보: 본인만 읽고 쓸 수 있음 (이메일은 다른 사람에게 절대 안 보임)
+    // 학년·반·번호(seat)는 seats 문서의 주인이 나일 때만 저장 가능
     match /users/{uid} {
-      allow read, write: if request.auth != null && request.auth.uid == uid;
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow create, update: if request.auth != null && request.auth.uid == uid
+        && request.resource.data.grade in [1, 2, 3]
+        && request.resource.data.classNo is int && request.resource.data.classNo >= 1 && request.resource.data.classNo <= 30
+        && request.resource.data.number is int && request.resource.data.number >= 1 && request.resource.data.number <= 60
+        && request.resource.data.seat == string(request.resource.data.grade) + '-'
+             + string(request.resource.data.classNo) + '-' + string(request.resource.data.number)
+        && getAfter(/databases/$(database)/documents/seats/$(request.resource.data.seat)).data.uid == uid;
+    }
+
+    // 학년·반·번호 자리: 한 자리에는 한 계정만 (먼저 등록한 사람이 주인)
+    match /seats/{seat} {
+      allow get: if request.auth != null;
+      allow create: if request.auth != null && request.resource.data.uid == request.auth.uid;
+      allow delete: if request.auth != null && resource.data.uid == request.auth.uid;
     }
 
     match /surveys/{surveyId} {
-      // 로그인한 학생은 누구나 설문 목록을 볼 수 있음
       allow read: if request.auth != null;
 
-      // 설문 만들기: 본인 이름으로만, 제목 100자·질문 30개 이하
       allow create: if request.auth != null
         && request.resource.data.ownerUid == request.auth.uid
         && request.resource.data.title is string
@@ -21,12 +34,13 @@ service cloud.firestore {
         && request.resource.data.questions.size() > 0
         && request.resource.data.questions.size() <= 30;
 
-      // 삭제: 만든 사람만
       allow delete: if request.auth != null && resource.data.ownerUid == request.auth.uid;
 
-      // 응답: 한 사람당 한 번만 (문서 이름 = 내 uid, 수정 불가)
+      // 응답: 한 계정당 한 번만 (문서 이름 = 내 uid, 수정 불가)
+      // 학년·반·번호를 등록한 학생만 응답 가능
       match /responses/{uid} {
-        allow create: if request.auth != null && request.auth.uid == uid;
+        allow create: if request.auth != null && request.auth.uid == uid
+          && exists(/databases/$(database)/documents/users/$(request.auth.uid));
         allow read: if request.auth != null && (
           request.auth.uid == uid ||
           get(/databases/$(database)/documents/surveys/$(surveyId)).data.ownerUid == request.auth.uid
