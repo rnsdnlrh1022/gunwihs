@@ -1,5 +1,5 @@
 // 사이트를 수정해서 다시 올릴 때마다 숫자를 올려주세요 (v2 → v3)
-const CACHE = 'survey-v3';
+const CACHE = 'survey-v4';
 const FILES = ['./', './index.html', './manifest.json', './icon-192.png', './icon-512.png'];
 
 self.addEventListener('install', (e) => {

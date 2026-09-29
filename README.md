@@ -25,7 +25,7 @@
 
 ## 4. 구글 로그인 켜기
 1. Authentication → 시작하기 → 로그인 방법 → **Google** → 사용 설정 → 지원 이메일 선택 → 저장
-2. Authentication → 설정 → 승인된 도메인 → 도메인 추가 → `내GitHub아이디.github.io` (예: gunwihs.github.io)
+2. Authentication → 설정 → 승인된 도메인 → 도메인 추가 → `rnsdnlrh1022.github.io`
 
 ## 5. 데이터베이스 만들기
 1. Firestore Database → 데이터베이스 만들기 → 위치 `asia-northeast3 (Seoul)` → 프로덕션 모드
