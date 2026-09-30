@@ -202,6 +202,8 @@
   .urow-main a { color: var(--blue); }
   .small { font-size: 13px; color: var(--sub); margin-top: 2px; word-break: break-all; }
   .btn.sm { padding: 8px 12px; font-size: 14px; border-radius: 10px; flex: none; }
+  .role-pick { width: 100%; border: 0; text-align: left; cursor: pointer; font: inherit; color: inherit; }
+  .role-pick > span { font-size: 22px; color: var(--sub); }
   .loading { text-align: center; color: var(--sub); padding: 40px 0; }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 </style>
@@ -248,7 +250,9 @@ function toast(msg, ms = 2500) {
   const t = $('#toast'); t.textContent = msg; t.hidden = false;
   clearTimeout(toastTimer); toastTimer = setTimeout(() => (t.hidden = true), ms);
 }
-const gradeLabel = (g) => (g ? `${g}학년` : '전체 학년');
+const TEACHER_ONLY = 9;                                         // 대상: 선생님 전용
+const gradeLabel = (g) => (g === TEACHER_ONLY ? '선생님 전용' : g ? `${g}학년` : '전체');
+const canSeeTeacherOnly = () => S.role === 'teacher' || S.role === 'master';
 const genderLabel = (g) => ({ M: '남', F: '여' }[g] || '');
 const TYPES = { single: '객관식 (하나 선택)', multi: '체크박스 (여러 개)', short: '단답형', long: '서술형', scale: '점수 (1~5)' };
 const hasOptions = (t) => t === 'single' || t === 'multi';
@@ -277,11 +281,10 @@ function authError(e) {
     'auth/popup-blocked': '팝업이 차단됐어요. 브라우저에서 팝업을 허용해주세요.',
     'auth/network-request-failed': '인터넷 연결을 확인해주세요.',
     'auth/too-many-requests': '요청이 너무 많아요. 잠시 후 다시 시도해주세요.',
-    'auth/unauthorized-domain': '이 주소가 파이어베이스 승인 도메인에 없어요. 관리자에게 알려주세요.',
-    'auth/operation-not-allowed': '구글 로그인이 꺼져 있어요. 관리자에게 알려주세요.',
+    'auth/unauthorized-domain': '이 주소가 파이어베이스 승인 도메인에 없어요. master에게 알려주세요.',
+    'auth/operation-not-allowed': '구글 로그인이 꺼져 있어요. master에게 알려주세요.',
     'bad-pin': '비밀번호가 맞지 않아요.',
-    'auth/admin-restricted-operation': '선생님·관리자 로그인(익명 로그인)이 꺼져 있어요. Firebase 설정을 확인해주세요.',
-    'seat-taken': '이미 다른 계정이 등록한 학년·반·번호예요. 번호를 다시 확인하고, 맞다면 설문 관리자에게 알려주세요.'
+    'seat-taken': '이미 다른 계정이 등록한 학년·반·번호예요. 번호를 다시 확인하고, 맞다면 master에게 알려주세요.'
   };
   return map[e?.code] || '문제가 생겼어요. 잠시 후 다시 시도해주세요.';
 }
@@ -303,12 +306,9 @@ function demoApi() {
       const u = { uid: 'demo_' + e.replace(/[^a-z0-9]/g, '_'), email: e, name: e.split('@')[0], isAnonymous: false };
       save('demo:session', u); listener?.(u); return u;
     },
-    async signInStaff(role, name, pin) {
+    async claimRole(uid, role, name, pin, email) {
       if (pin !== DEMO_PINS[role]) throw { code: 'bad-pin' };
-      const nm = role === 'master' ? '관리자' : name;
-      const u = { uid: 'staff_' + role + '_' + encodeURIComponent(nm), isAnonymous: true, name: nm };
-      const roles = load('demo:roles', {}); roles[u.uid] = { role, name: nm, createdAt: Date.now() }; save('demo:roles', roles);
-      save('demo:session', u); listener?.(u); return u;
+      const roles = load('demo:roles', {}); roles[uid] = { role, name, email, createdAt: Date.now() }; save('demo:roles', roles);
     },
     async getRole(uid) { return load('demo:roles', {})[uid] || null; },
     async logout() { try { localStorage.removeItem('demo:session'); } catch {} listener?.(null); },
@@ -323,8 +323,14 @@ function demoApi() {
       save('demo:seats', seats); save('demo:users', users);
     },
     async touchLogin(uid) { const u = load('demo:users', {}); if (u[uid]) { u[uid].lastLoginAt = Date.now(); save('demo:users', u); } },
-    async listSurveys() { return Object.values(load('demo:surveys', {})).sort((a, b) => b.createdAt - a.createdAt); },
-    async getSurvey(id) { return load('demo:surveys', {})[id] || null; },
+    async listSurveys(all = true) {
+      return Object.values(load('demo:surveys', {})).filter((s) => all || !s.staffOnly).sort((a, b) => b.createdAt - a.createdAt);
+    },
+    async getSurvey(id, all = true) {
+      const s = load('demo:surveys', {})[id] || null;
+      if (s && s.staffOnly && !all) throw { code: 'permission-denied' };
+      return s;
+    },
     async createSurvey(d) {
       const all = load('demo:surveys', {}); const id = 's' + Date.now().toString(36);
       all[id] = { ...d, id, createdAt: Date.now() }; save('demo:surveys', all); return id;
@@ -341,7 +347,7 @@ function demoApi() {
     },
     async listResponses(id) { return Object.values(load('demo:responses', {})[id] || {}); },
     async countResponses(id) { return Object.keys(load('demo:responses', {})[id] || {}).length; },
-    // ----- 관리자 -----
+    // ----- master -----
     async listUsers() { return Object.entries(load('demo:users', {})).map(([uid, d]) => ({ uid, ...d })); },
     async resetUser(uid, seat) {
       const users = load('demo:users', {}), seats = load('demo:seats', {});
@@ -377,19 +383,10 @@ async function firebaseApi() {
         throw e;
       }
     },
-    // 선생님·관리자: 익명 로그인 후, 비밀번호가 맞을 때만 서버 규칙이 역할 문서를 만들어줌
-    async signInStaff(role, name, pin) {
-      const cred = await A.signInAnonymously(auth);
-      try {
-        await F.setDoc(F.doc(db, 'roles', cred.user.uid), {
-          role, name: role === 'master' ? '관리자' : name, pin, createdAt: F.serverTimestamp()
-        });
-      } catch (e) {
-        try { await cred.user.delete(); } catch {}
-        await A.signOut(auth).catch(() => {});
-        throw { code: e.code === 'permission-denied' ? 'bad-pin' : e.code };
-      }
-      return toUser(cred.user);
+    // 선생님·master: 비밀번호가 맞을 때만 서버 규칙이 역할 문서를 만들어줌
+    async claimRole(uid, role, name, pin, email) {
+      try { await F.setDoc(F.doc(db, 'roles', uid), { role, name, pin, email, createdAt: F.serverTimestamp() }); }
+      catch (e) { throw { code: e.code === 'permission-denied' ? 'bad-pin' : e.code }; }
     },
     async getRole(uid) { const s = await F.getDoc(F.doc(db, 'roles', uid)); return s.exists() ? s.data() : null; },
     logout: () => A.signOut(auth),
@@ -408,9 +405,12 @@ async function firebaseApi() {
       catch (e) { if (e.code === 'permission-denied') throw { code: 'seat-taken' }; throw e; }
     },
     touchLogin: (uid) => F.updateDoc(F.doc(db, 'users', uid), { lastLoginAt: F.serverTimestamp() }),
-    async listSurveys() {
-      const s = await F.getDocs(F.query(F.collection(db, 'surveys'), F.orderBy('createdAt', 'desc'), F.limit(300)));
-      return s.docs.map(withId);
+    async listSurveys(all = true) {
+      const col = F.collection(db, 'surveys');
+      const q = all ? F.query(col, F.orderBy('createdAt', 'desc'), F.limit(300))
+                    : F.query(col, F.where('staffOnly', '==', false), F.limit(300));   // 학생: 선생님 전용 제외
+      const s = await F.getDocs(q);
+      return s.docs.map(withId).sort((a, b) => b.createdAt - a.createdAt);
     },
     async getSurvey(id) { const s = await F.getDoc(F.doc(db, 'surveys', id)); return s.exists() ? withId(s) : null; },
     async createSurvey(d) { const r = await F.addDoc(F.collection(db, 'surveys'), { ...d, createdAt: F.serverTimestamp() }); return r.id; },
@@ -419,7 +419,7 @@ async function firebaseApi() {
     submitResponse: (id, uid, d) => F.setDoc(F.doc(db, 'surveys', id, 'responses', uid), { ...d, createdAt: F.serverTimestamp() }),
     async listResponses(id) { const s = await F.getDocs(F.collection(db, 'surveys', id, 'responses')); return s.docs.map((d) => d.data()); },
     async countResponses(id) { const s = await F.getCountFromServer(F.collection(db, 'surveys', id, 'responses')); return s.data().count; },
-    // ----- 관리자 -----
+    // ----- master -----
     async listUsers() {
       const s = await F.getDocs(F.collection(db, 'users'));
       return s.docs.map((d) => { const x = d.data(); return { ...x, uid: d.id, createdAt: ms(x.createdAt), lastLoginAt: ms(x.lastLoginAt) }; });
@@ -439,7 +439,7 @@ async function firebaseApi() {
     },
     async listRoles() {
       const s = await F.getDocs(F.collection(db, 'roles'));
-      return s.docs.map((d) => { const x = d.data(); return { uid: d.id, role: x.role, name: x.name, createdAt: ms(x.createdAt) }; });
+      return s.docs.map((d) => { const x = d.data(); return { uid: d.id, role: x.role, name: x.name, email: x.email, createdAt: ms(x.createdAt) }; });
     },
     removeRole: (uid) => F.deleteDoc(F.doc(db, 'roles', uid)),
     setPins: (p) => F.setDoc(F.doc(db, 'config', 'secrets'), p)
@@ -449,16 +449,16 @@ async function firebaseApi() {
 /* =================================================================
    ③ 화면
 ================================================================= */
-const S = { user: null, profile: null, role: null, staffName: '', staffLogin: false, adminTab: 'students', filter: { q: '', grade: 0, tab: 'all' } };
+const S = { user: null, profile: null, role: null, staffName: '', adminTab: 'students', filter: { q: '', grade: 0, tab: 'all' } };
 let api;
 const isStaff = () => S.role === 'teacher' || S.role === 'master';
 const isMaster = () => S.role === 'master';
-const ready = () => !!S.user && (isStaff() || !!S.profile?.number);
+const ready = () => !!S.user && (S.role === 'teacher' || !!S.profile?.number);   // master도 학번 필요
 const seatLabel = (seat) => { const [g, c, n] = String(seat || '').split('-'); return n ? `${g}학년 ${c}반 ${n}번` : ''; };
 const ownerText = (s) => {
   if (s.ownerRole === 'student') return [seatLabel(s.ownerLabel), s.ownerName].filter(Boolean).join(' ');
   if (s.ownerRole === 'teacher') return `${s.ownerLabel} 선생님`;
-  if (s.ownerRole === 'master') return '관리자';
+  if (s.ownerRole === 'master') return 'master';
   return s.ownerName || '';
 };
 const fmtTime = (t) => t ? new Date(t).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '-';
@@ -469,7 +469,7 @@ function updateHeader() {
   if (!ready()) { me.hidden = true; return; }
   me.hidden = false;
   me.textContent = S.role === 'teacher' ? `${S.staffName} 선생님`
-    : S.role === 'master' ? '마스터' : `${S.profile.grade}-${S.profile.classNo} ${S.profile.number}번`;
+    : S.role === 'master' ? `master · ${S.profile.grade}-${S.profile.classNo} ${S.profile.number}번` : `${S.profile.grade}-${S.profile.classNo} ${S.profile.number}번`;
 }
 
 function route() {
@@ -477,13 +477,14 @@ function route() {
   window.scrollTo(0, 0);
   if (a === 'new') return renderBuilder();
   if (a === 'me') return isStaff() ? renderStaffMe() : renderProfile(false);
+  if (a === 'profile') return renderProfile(false);
   if (a === 'admin') return isMaster() ? renderAdmin() : renderList();
   if (a === 's' && b && c === 'results') return renderResults(b);
   if (a === 's' && b) return renderSurvey(b);
   renderList();
 }
 
-// 로그인 상태가 바뀌면 역할(학생/선생님/관리자)을 확인하고 화면을 보여줌
+// 로그인하면: 역할(선생님/master) → 학생 정보 → 둘 다 없으면 역할 선택
 async function enter(u) {
   S.user = u; S.role = null; S.profile = null; S.staffName = '';
   if (!u) {
@@ -492,87 +493,94 @@ async function enter(u) {
   }
   app.innerHTML = '<div class="loading">불러오는 중…</div>';
   try {
-    if (u.isAnonymous) {
-      const r = await api.getRole(u.uid);
-      if (!r) { await api.logout(); return; }
-      S.role = r.role; S.staffName = r.name || '';
-    } else {
-      S.role = 'student';
+    const r = await api.getRole(u.uid);
+    if (r) { S.role = r.role; S.staffName = r.name || ''; }
+    if (!r || r.role === 'master') {                       // 학생·master는 학년·반·번호 정보가 있어야 함
       S.profile = await api.getProfile(u.uid);
-      if (S.profile?.number) api.touchLogin(u.uid).catch(() => {});
+      if (S.profile?.number) { if (!r) S.role = 'student'; api.touchLogin(u.uid).catch(() => {}); }
     }
   } catch (e) { console.error(e); }
   updateHeader();
-  if (S.role === 'student' && !S.profile?.number) return renderProfile(true);
+  if (!S.role) return renderChooseRole();
+  if (S.role === 'master' && !S.profile?.number) return renderProfile(true);
   route();
 }
 
-/* ---------- 로그인 (학생: 구글 / 선생님: 이름+비밀번호 / 관리자: 비밀번호) ---------- */
-let loginTab = 'student';
+/* ---------- 로그인 (모두 구글 계정) ---------- */
 function renderLogin() {
   app.innerHTML = `
   <section class="auth">
-    <h1>로그인</h1>
-    <div class="tabs" role="tablist">
-      ${[['student', '학생'], ['teacher', '선생님'], ['master', '관리자']].map(([k, l]) =>
-        `<button role="tab" data-t="${k}" aria-selected="${loginTab === k}">${l}</button>`).join('')}
-    </div>
-    <div id="loginBody"></div>
+    <h1>구글 계정으로 시작하기</h1>
+    <p class="sub">학생과 선생님 모두 구글 계정으로 로그인해요. 로그인한 뒤 학생 / 선생님 / master를 고를 수 있어요.</p>
+    ${IN_APP ? `<div class="demo" style="margin:0 0 16px">카카오톡·인스타그램 같은 앱 안에서는 구글 로그인이 막혀 있어요.
+      오른쪽 위 메뉴(⋮ 또는 …)에서 <b>다른 브라우저로 열기</b>를 눌러주세요.
+      <button class="btn soft full" id="copyLink" style="margin-top:10px">주소 복사하기</button></div>` : ''}
+    <label class="check"><input type="checkbox" id="agree">
+      <span>개인정보(구글 이메일, 학년·반·번호·성별) 수집과 이용에 동의해요. 설문 참여와 중복 참여 방지에 쓰이고, 설문을 올리면 작성자로 표시돼요.</span></label>
+    <button class="btn google full" id="googleBtn">Google 계정으로 로그인</button>
+    ${DEMO ? `<div class="demo">체험 모드예요. 아무 이메일로 로그인할 수 있고, 데이터는 이 기기에만 저장돼요.</div>` : ''}
   </section>`;
-  app.querySelector('.tabs').onclick = (e) => { const b = e.target.closest('[data-t]'); if (!b) return; loginTab = b.dataset.t; renderLogin(); };
-  const body = $('#loginBody');
+  const copy = $('#copyLink');
+  if (copy) copy.onclick = async () => {
+    try { await navigator.clipboard.writeText(location.href); toast('주소를 복사했어요. 크롬이나 사파리에 붙여넣어 주세요.', 4000); }
+    catch { prompt('아래 주소를 복사하세요', location.href); }
+  };
+  const btn = $('#googleBtn');
+  btn.onclick = async () => {
+    if (!$('#agree').checked) return toast('개인정보 수집에 동의해주세요.');
+    if (IS_KAKAO && !DEMO) { location.href = 'kakaotalk://web/openExternal?url=' + encodeURIComponent(location.href); return; }
+    btn.disabled = true; btn.textContent = '로그인하는 중…';
+    try { await api.signIn(); }
+    catch (e) { console.error(e); toast(authError(e), 4000); }
+    btn.disabled = false; btn.textContent = 'Google 계정으로 로그인';
+  };
+}
 
-  if (loginTab === 'student') {
-    body.innerHTML = `
-      <p class="sub">한 사람당 한 번만 참여할 수 있도록 구글 계정으로 확인해요. 이메일은 다른 학생에게 보이지 않아요.</p>
-      ${IN_APP ? `<div class="demo" style="margin:0 0 16px">카카오톡·인스타그램 같은 앱 안에서는 구글 로그인이 막혀 있어요.
-        오른쪽 위 메뉴(⋮ 또는 …)에서 <b>다른 브라우저로 열기</b>를 눌러주세요.
-        <button class="btn soft full" id="copyLink" style="margin-top:10px">주소 복사하기</button></div>` : ''}
-      <label class="check"><input type="checkbox" id="agree">
-        <span>개인정보(구글 이메일, 학년·반·번호·성별) 수집과 이용에 동의해요. 설문 참여와 중복 참여 방지에 쓰이고, 설문을 올리면 학년·반·번호가 작성자로 표시돼요.</span></label>
-      <button class="btn google full" id="googleBtn">Google 계정으로 로그인</button>
-      ${DEMO ? `<div class="demo">체험 모드예요. 아무 이메일로 로그인할 수 있고, 데이터는 이 기기에만 저장돼요.</div>` : ''}`;
-    const copy = $('#copyLink');
-    if (copy) copy.onclick = async () => {
-      try { await navigator.clipboard.writeText(location.href); toast('주소를 복사했어요. 크롬이나 사파리에 붙여넣어 주세요.', 4000); }
-      catch { prompt('아래 주소를 복사하세요', location.href); }
-    };
-    const btn = $('#googleBtn');
-    btn.onclick = async () => {
-      if (!$('#agree').checked) return toast('개인정보 수집에 동의해주세요.');
-      if (IS_KAKAO && !DEMO) { location.href = 'kakaotalk://web/openExternal?url=' + encodeURIComponent(location.href); return; }
-      btn.disabled = true; btn.textContent = '로그인하는 중…';
-      try { await api.signIn(); }
-      catch (e) { console.error(e); toast(authError(e), 4000); }
-      btn.disabled = false; btn.textContent = 'Google 계정으로 로그인';
-    };
+/* ---------- 역할 선택: 학생 / 선생님(이름+비밀번호) / master(비밀번호) ---------- */
+function renderChooseRole(pick) {
+  if (pick === 'student') return renderProfile(true);
+  if (!pick) {
+    app.innerHTML = `
+    <section class="auth">
+      <h1>어떤 계정으로 쓸까요?</h1>
+      <p class="sub">${esc(S.user.email || '')}</p>
+      <div class="cards">
+        <button class="urow role-pick" data-p="student"><div class="urow-main"><b>학생</b><div class="small">학년·반·번호를 등록하고 설문에 참여해요.</div></div><span>›</span></button>
+        <button class="urow role-pick" data-p="teacher"><div class="urow-main"><b>선생님</b><div class="small">이름과 선생님 비밀번호가 필요해요. 모든 설문 결과를 볼 수 있어요.</div></div><span>›</span></button>
+        <button class="urow role-pick" data-p="master"><div class="urow-main"><b>master</b><div class="small">master 비밀번호가 필요해요.</div></div><span>›</span></button>
+      </div>
+      <button class="btn ghost full" id="logoutBtn" style="margin-top:12px">다른 구글 계정으로 로그인</button>
+    </section>`;
+    app.querySelector('.cards').onclick = (e) => { const b = e.target.closest('[data-p]'); if (b) renderChooseRole(b.dataset.p); };
+    $('#logoutBtn').onclick = () => api.logout();
     return;
   }
-
-  const teacher = loginTab === 'teacher';
-  body.innerHTML = `
-    <p class="sub">${teacher ? '이름과 선생님 비밀번호를 입력해주세요. 선생님은 모든 설문의 결과를 볼 수 있어요.' : '관리자 비밀번호를 입력해주세요.'}</p>
+  const teacher = pick === 'teacher';
+  app.innerHTML = `
+  <section class="auth">
+    <a class="back" href="javascript:void 0" id="backBtn">← 다시 고르기</a>
+    <h1>${teacher ? '선생님 확인' : 'master 확인'}</h1>
+    <p class="sub">${teacher ? '이름과 선생님 비밀번호를 입력해주세요. 한 번 확인하면 이 구글 계정은 계속 선생님 계정으로 쓰여요.' : 'master 비밀번호를 입력해주세요.'}</p>
     ${teacher ? '<label class="field"><span>이름</span><input id="staffName" maxlength="20" autocomplete="name" placeholder="예: 김민지"></label>' : ''}
     <label class="field"><span>비밀번호</span><input id="staffPin" type="password" inputmode="numeric" autocomplete="off" maxlength="20"></label>
-    <button class="btn primary full" id="staffBtn">로그인</button>
-    ${DEMO ? `<div class="demo">체험 모드 비밀번호: 선생님 1234, 관리자 123456</div>` : ''}`;
+    <button class="btn primary full" id="staffBtn">확인</button>
+    ${DEMO ? `<div class="demo">체험 모드 비밀번호: 선생님 1234, master 123456</div>` : ''}
+  </section>`;
+  $('#backBtn').onclick = () => renderChooseRole();
   const btn = $('#staffBtn');
   const go = async () => {
-    const name = teacher ? $('#staffName').value.trim() : '';
+    const name = teacher ? $('#staffName').value.trim() : 'master';
     const pin = $('#staffPin').value.trim();
-    if (teacher && !name) return toast('이름을 입력해주세요.');
+    if (!name) return toast('이름을 입력해주세요.');
     if (!pin) return toast('비밀번호를 입력해주세요.');
     btn.disabled = true; btn.textContent = '확인하는 중…';
-    S.staffLogin = true;
     try {
-      const u = await api.signInStaff(loginTab, name, pin);
-      S.staffLogin = false;
-      await enter(u);
-      toast(teacher ? `${name} 선생님, 환영해요!` : '관리자로 로그인했어요.');
+      await api.claimRole(S.user.uid, pick, name, pin, S.user.email || '');
+      toast(teacher ? `${name} 선생님, 환영해요!` : 'master로 로그인했어요.');
+      await enter(S.user);
     } catch (e) {
-      S.staffLogin = false; console.error(e);
-      toast(authError(e), 4000);
-      btn.disabled = false; btn.textContent = '로그인';
+      console.error(e); toast(authError(e), 4000);
+      btn.disabled = false; btn.textContent = '확인';
     }
   };
   btn.onclick = go;
@@ -583,12 +591,19 @@ function renderStaffMe() {
   app.innerHTML = `
   <section class="auth">
     <a class="back" href="#/">← 목록으로</a>
-    <h1>${S.role === 'master' ? '마스터 계정' : esc(S.staffName) + ' 선생님'}</h1>
-    <p class="sub">${S.role === 'master' ? '모든 설문과 학생 계정을 관리할 수 있어요.' : '모든 설문의 결과를 볼 수 있어요.'}</p>
-    ${S.role === 'master' ? '<a class="btn soft full" href="#/admin" style="margin-bottom:8px">관리 화면으로</a>' : ''}
+    <h1>${S.role === 'master' ? 'master 계정' : esc(S.staffName) + ' 선생님'}</h1>
+    <p class="sub">${esc(S.user.email || '')}<br>${S.role === 'master' ? '모든 설문과 학생 계정을 관리할 수 있어요.' : '모든 설문의 결과를 볼 수 있어요.'}</p>
+    ${S.role === 'master' ? `<a class="btn soft full" href="#/admin" style="margin-bottom:8px">관리 화면으로</a>
+      <a class="btn soft full" href="#/profile" style="margin-bottom:8px">내 학번 정보 수정 (${esc(seatLabel(S.profile?.seat))})</a>` : ''}
     <button class="btn ghost full" id="logoutBtn">로그아웃</button>
+    <button class="btn ghost full" id="dropRole" style="margin-top:4px;font-size:14px">${S.role === 'master' ? 'master' : '선생님'} 권한 내려놓기</button>
   </section>`;
   $('#logoutBtn').onclick = () => { if (confirm('로그아웃할까요?')) api.logout(); };
+  $('#dropRole').onclick = async () => {
+    if (!confirm('이 구글 계정의 권한을 내려놓을까요? 다음에 다시 비밀번호로 확인할 수 있어요.')) return;
+    try { await api.removeRole(S.user.uid); location.hash = '#/'; await enter(S.user); }
+    catch (e) { console.error(e); toast('처리하지 못했어요.'); }
+  };
 }
 
 /* ---------- 학년·반·번호·성별 저장 ---------- */
@@ -598,8 +613,8 @@ function renderProfile(first) {
     .map((n) => `<option value="${n}" ${sel == n ? 'selected' : ''}>${n}${unit}</option>`).join('');
   app.innerHTML = `
   <section class="auth">
-    ${first ? '' : '<a class="back" href="#/">← 목록으로</a>'}
-    <h1>${first ? '내 정보를 알려주세요' : '내 정보'}</h1>
+    ${first ? (S.role === 'master' ? '' : '<a class="back" href="javascript:void 0" id="pickBack">← 다시 고르기</a>') : '<a class="back" href="#/">← 목록으로</a>'}
+    <h1>${first ? (S.role === 'master' ? 'master님의 학번도 알려주세요' : '내 정보를 알려주세요') : '내 정보'}</h1>
     <p class="sub">${first ? '학년·반·번호는 한 계정만 등록할 수 있어요. 정확하게 선택해주세요.' : esc(S.user.email || '')}</p>
     <div class="field"><span>학년</span><div class="seg">
       ${[1, 2, 3].map((g) => `<label><input type="radio" name="grade" value="${g}" ${p.grade == g ? 'checked' : ''}><span>${g}학년</span></label>`).join('')}
@@ -628,12 +643,13 @@ function renderProfile(first) {
     const btn = $('#saveBtn'); btn.disabled = true;
     try {
       await api.saveProfile(S.user.uid, data);
-      S.profile = { ...S.profile, ...data }; updateHeader();
+      S.profile = { ...S.profile, ...data }; if (!S.role) S.role = 'student'; updateHeader();
       toast('저장했어요.');
       if (first) route(); else location.hash = '#/';
     } catch (e) { console.error(e); toast(authError(e), 5000); btn.disabled = false; }
   };
   $('#logoutBtn').onclick = () => { if (first || confirm('로그아웃할까요?')) api.logout(); };
+  if (first && $('#pickBack')) $('#pickBack').onclick = () => renderChooseRole();
 }
 
 /* ---------- 설문 목록 ---------- */
@@ -647,7 +663,7 @@ async function renderList() {
     </div>
     <input id="q" class="input" type="search" placeholder="설문 제목으로 검색" value="${esc(f.q)}">
     <div class="chips">
-      ${[0, 1, 2, 3].map((g) => `<button data-grade="${g}" aria-pressed="${f.grade === g}">${g ? g + '학년' : '전체'}</button>`).join('')}
+      ${[0, 1, 2, 3, ...(canSeeTeacherOnly() ? [TEACHER_ONLY] : [])].map((g) => `<button data-grade="${g}" aria-pressed="${f.grade === g}">${g === TEACHER_ONLY ? '선생님' : g ? g + '학년' : '전체'}</button>`).join('')}
     </div>
     <div id="cards" class="cards"><div class="loading">불러오는 중…</div></div>
     <a class="fab" href="#/new">＋ 설문 만들기</a>`;
@@ -656,7 +672,8 @@ async function renderList() {
     const q = f.q.trim().toLowerCase();
     const list = surveys.filter((s) =>
       (f.tab === 'mine' ? s.ownerUid === S.user.uid : true) &&
-      (!f.grade || s.grade === 0 || s.grade === f.grade) &&
+      (s.grade !== TEACHER_ONLY || canSeeTeacherOnly()) &&          // 학생에게는 선생님 전용 설문 숨김
+      (!f.grade || s.grade === f.grade || (s.grade === 0 && f.grade !== TEACHER_ONLY)) &&
       (!q || s.title.toLowerCase().includes(q)));
     $('#cards').innerHTML = list.length ? list.map(cardHtml).join('') :
       `<div class="empty"><b>${f.tab === 'mine' ? '아직 만든 설문이 없어요' : '설문이 없어요'}</b>
@@ -675,7 +692,7 @@ async function renderList() {
     draw();
   };
   $('#q').oninput = (e) => { f.q = e.target.value; draw(); };
-  try { surveys = await api.listSurveys(); draw(); }
+  try { surveys = await api.listSurveys(canSeeTeacherOnly()); draw(); }
   catch (e) { console.error(e); $('#cards').innerHTML = `<div class="empty"><b>목록을 불러오지 못했어요</b>인터넷 연결을 확인하고 새로고침해주세요.</div>`; }
 }
 function cardHtml(s) {
@@ -698,20 +715,29 @@ function cardHtml(s) {
 async function renderSurvey(id) {
   app.innerHTML = '<div class="loading">불러오는 중…</div>';
   let s, mine;
-  try { [s, mine] = await Promise.all([api.getSurvey(id), api.getMyResponse(id, S.user.uid)]); }
-  catch (e) { console.error(e); app.innerHTML = '<div class="empty"><b>설문을 불러오지 못했어요</b><a href="#/">목록으로 돌아가기</a></div>'; return; }
+  try { [s, mine] = await Promise.all([api.getSurvey(id, canSeeTeacherOnly()), api.getMyResponse(id, S.user.uid)]); }
+  catch (e) {
+    console.error(e);
+    app.innerHTML = e?.code === 'permission-denied'
+      ? '<div class="empty"><b>삭제되었거나 없는 설문이에요</b><a href="#/">목록으로 돌아가기</a></div>'
+      : '<div class="empty"><b>설문을 불러오지 못했어요</b><a href="#/">목록으로 돌아가기</a></div>';
+    return;
+  }
   if (!s) { app.innerHTML = '<div class="empty"><b>삭제되었거나 없는 설문이에요</b><a href="#/">목록으로 돌아가기</a></div>'; return; }
 
   const d = ddayInfo(s.deadline);
   const isOwner = s.ownerUid === S.user.uid;
   const canResults = isOwner || isStaff();
   const canDelete = isOwner || isMaster();
-  const wrongGrade = !isStaff() && s.grade && s.grade !== S.profile.grade;
+  const isTeacher = S.role === 'teacher';
+  let blocked = '';
+  if (s.grade === TEACHER_ONLY && !isTeacher) blocked = `<b>선생님 전용 설문이에요</b><p>선생님만 응답할 수 있어요.</p>`;
+  else if (s.grade >= 1 && s.grade <= 3 && isTeacher) blocked = `<b>${s.grade}학년 학생 대상 설문이에요</b><p>결과 보기에서 응답을 확인하세요.</p>`;
+  else if (s.grade >= 1 && s.grade <= 3 && s.grade !== S.profile?.grade) blocked = `<b>${s.grade}학년 대상 설문이에요</b><p>내 정보의 학년이 다르면 참여할 수 없어요.</p>`;
   let body;
-  if (isStaff()) body = `<div class="notice"><b>${S.role === 'master' ? '관리자' : '선생님'} 계정이에요</b><p>응답은 학생만 할 수 있어요. 결과 보기에서 응답을 확인하세요.</p></div>`;
-  else if (mine) body = `<div class="notice"><b>참여를 완료했어요 ✓</b><p>응답은 한 번만 할 수 있어요.</p></div>`;
+  if (mine) body = `<div class="notice"><b>참여를 완료했어요 ✓</b><p>응답은 한 번만 할 수 있어요.</p></div>`;
   else if (d.closed) body = `<div class="notice"><b>마감된 설문이에요</b><p>${esc(s.deadline)}에 마감되었어요.</p></div>`;
-  else if (wrongGrade) body = `<div class="notice"><b>${s.grade}학년 대상 설문이에요</b><p>내 정보의 학년이 다르면 참여할 수 없어요.</p></div>`;
+  else if (blocked) body = `<div class="notice">${blocked}</div>`;
   else body = `<form id="answerForm" novalidate>${s.questions.map(questionHtml).join('')}
       <button class="btn primary full" type="submit">제출하기</button></form>`;
 
@@ -762,7 +788,9 @@ async function renderSurvey(id) {
     }
     const btn = form.querySelector('[type=submit]'); btn.disabled = true;
     try {
-      await api.submitResponse(id, S.user.uid, { answers, grade: S.profile.grade, classNo: S.profile.classNo, gender: S.profile.gender });
+      await api.submitResponse(id, S.user.uid, isTeacher
+        ? { answers, role: 'teacher', name: S.staffName, grade: 0, classNo: 0, gender: '' }
+        : { answers, role: 'student', grade: S.profile.grade, classNo: S.profile.classNo, gender: S.profile.gender });
       toast('제출했어요. 참여해줘서 고마워요!');
       renderSurvey(id);
     } catch (err) { console.error(err); toast('제출하지 못했어요. 이미 참여했는지 확인해주세요.'); btn.disabled = false; }
@@ -791,12 +819,12 @@ function renderBuilder() {
     <h1>새 설문 만들기</h1>
     <p class="sub">질문을 추가하고 선택지를 적으면 바로 설문이 만들어져요.</p>
     <div class="box">
-      ${S.role === 'student' ? `<label class="field"><span>작성자 이름</span><input id="bName" maxlength="20" autocomplete="name" placeholder="예: 서은수" value="${esc((() => { try { return localStorage.getItem('ownerName') || ''; } catch { return ''; } })())}">
+      ${S.profile?.seat ? `<label class="field"><span>작성자 이름</span><input id="bName" maxlength="20" autocomplete="name" placeholder="예: 서은수" value="${esc((() => { try { return localStorage.getItem('ownerName') || ''; } catch { return ''; } })())}">
         <small class="small">설문 목록에 "${esc(seatLabel(S.profile.seat))} 이름"으로 표시돼요.</small></label>` : ''}
       <label class="field"><span>설문 제목</span><input id="bTitle" maxlength="100" placeholder="예: 체육대회 종목 투표"></label>
       <label class="field"><span>설명 (선택)</span><textarea id="bDesc" maxlength="500" placeholder="설문 목적이나 안내를 적어주세요"></textarea></label>
       <div class="field"><span>대상 학년</span><div class="seg">
-        ${[0, 1, 2, 3].map((g) => `<label><input type="radio" name="bGrade" value="${g}" ${g === 0 ? 'checked' : ''}><span>${g ? g + '학년' : '전체'}</span></label>`).join('')}
+        ${[0, 1, 2, 3, ...(canSeeTeacherOnly() ? [TEACHER_ONLY] : [])].map((g) => `<label><input type="radio" name="bGrade" value="${g}" ${g === 0 ? 'checked' : ''}><span>${g === TEACHER_ONLY ? '선생님 전용' : g ? g + '학년' : '전체'}</span></label>`).join('')}
       </div></div>
       <label class="field" style="margin:0"><span>마감일 (선택)</span><input id="bDeadline" type="date" min="${todayStr()}"></label>
     </div>
@@ -867,8 +895,9 @@ function renderBuilder() {
     draft.desc = $('#bDesc').value.trim();
     draft.grade = Number(document.querySelector('input[name=bGrade]:checked').value);
     draft.deadline = $('#bDeadline').value;
-    const ownerName = S.role === 'student' ? $('#bName').value.trim() : '';
-    if (S.role === 'student' && !ownerName) { $('#bName').focus(); return toast('작성자 이름을 입력해주세요.'); }
+    const asStudent = !!S.profile?.seat && S.role !== 'teacher';
+    const ownerName = asStudent ? $('#bName').value.trim() : '';
+    if (asStudent && !ownerName) { $('#bName').focus(); return toast('작성자 이름을 입력해주세요.'); }
     if (!draft.title) { $('#bTitle').focus(); return toast('설문 제목을 입력해주세요.'); }
     for (const [i, q] of draft.questions.entries()) {
       if (!q.title.trim()) return toast(`${i + 1}번 질문 내용을 입력해주세요.`);
@@ -882,8 +911,8 @@ function renderBuilder() {
     try {
       const id = await api.createSurvey({
         title: draft.title, desc: draft.desc, grade: draft.grade, deadline: draft.deadline,
-        questions, ownerUid: S.user.uid,
-        ...(S.role === 'student' ? { ownerRole: 'student', ownerLabel: S.profile.seat, ownerName } : { ownerRole: S.role, ownerLabel: S.staffName })
+        questions, ownerUid: S.user.uid, staffOnly: draft.grade === TEACHER_ONLY,
+        ...(asStudent ? { ownerRole: 'student', ownerLabel: S.profile.seat, ownerName } : { ownerRole: S.role, ownerLabel: S.staffName })
       });
       if (ownerName) { try { localStorage.setItem('ownerName', ownerName); } catch {} }
       toast('설문을 올렸어요!');
@@ -893,12 +922,12 @@ function renderBuilder() {
 }
 const newQuestion = () => ({ type: 'single', title: '', options: ['', ''], required: true });
 
-/* ---------- 결과 보기 (만든 사람·선생님·관리자) ---------- */
+/* ---------- 결과 보기 (만든 사람·선생님·master) ---------- */
 async function renderResults(id) {
   app.innerHTML = '<div class="loading">결과를 모으는 중…</div>';
   let s, all;
   try {
-    s = await api.getSurvey(id);
+    s = await api.getSurvey(id, canSeeTeacherOnly());
     if (!s || (s.ownerUid !== S.user.uid && !isStaff())) { app.innerHTML = '<div class="empty"><b>설문을 만든 사람과 선생님만 결과를 볼 수 있어요</b><a href="#/">목록으로 돌아가기</a></div>'; return; }
     all = await api.listResponses(id);
   } catch (e) { console.error(e); app.innerHTML = '<div class="empty"><b>결과를 불러오지 못했어요</b><a href="#/">목록으로 돌아가기</a></div>'; return; }
@@ -908,16 +937,17 @@ async function renderResults(id) {
     <a class="back" href="#/s/${esc(id)}">← 설문으로</a>
     <h1>${esc(s.title)}</h1>
     <p class="sub">응답 결과</p>
-    <div class="chips" id="gradeF">${[0, 1, 2, 3].map((g) => `<button data-v="${g}" aria-pressed="${g === 0}">${g ? g + '학년' : '전체 학년'}</button>`).join('')}</div>
+    <div class="chips" id="gradeF">${[0, 1, 2, 3, TEACHER_ONLY].map((g) => `<button data-v="${g}" aria-pressed="${g === 0}">${g === TEACHER_ONLY ? '선생님' : g ? g + '학년' : '전체'}</button>`).join('')}</div>
     <div class="chips" id="genderF" style="margin-top:-8px">${[['', '전체 성별'], ['M', '남'], ['F', '여']].map(([v, l]) => `<button data-v="${v}" aria-pressed="${v === ''}">${l}</button>`).join('')}</div>
     <div id="res"></div>
     <button class="btn soft full" id="csvBtn">엑셀(CSV)로 내려받기</button>`;
 
   const draw = () => {
-    const rs = all.filter((r) => (!f.grade || r.grade === f.grade) && (!f.gender || r.gender === f.gender));
+    const isT = (r) => r.role === 'teacher';
+    const rs = all.filter((r) => (!f.grade || (f.grade === TEACHER_ONLY ? isT(r) : r.grade === f.grade)) && (!f.gender || r.gender === f.gender));
     const n = rs.length;
     let html = `<div class="box"><div class="big-num">${n}명</div><p class="sub" style="margin:6px 0 0">
-      ${[1, 2, 3].map((g) => `${g}학년 ${rs.filter((r) => r.grade === g).length}명`).join(', ')}</p></div>`;
+      ${[1, 2, 3].map((g) => `${g}학년 ${rs.filter((r) => !isT(r) && r.grade === g).length}명`).join(', ')}, 선생님 ${rs.filter(isT).length}명</p></div>`;
     s.questions.forEach((q, i) => {
       const vals = rs.map((r) => r.answers?.[i]);
       html += `<div class="q"><div class="q-title"><span class="num">${i + 1}</span>${esc(q.title)}</div>`;
@@ -953,8 +983,9 @@ async function renderResults(id) {
 
   $('#csvBtn').onclick = () => {
     const cell = (v) => `"${String(Array.isArray(v) ? v.join(', ') : v ?? '').replace(/"/g, '""')}"`;
-    const head = ['학년', '반', '성별', ...s.questions.map((q) => q.title)].map(cell).join(',');
-    const rows = all.map((r) => [r.grade, r.classNo, genderLabel(r.gender), ...s.questions.map((_, i) => r.answers?.[i])].map(cell).join(','));
+    const head = ['구분', '학년', '반', '성별', ...s.questions.map((q) => q.title)].map(cell).join(',');
+    const rows = all.map((r) => [r.role === 'teacher' ? `선생님(${r.name || ''})` : '학생', r.role === 'teacher' ? '' : r.grade, r.role === 'teacher' ? '' : r.classNo,
+      genderLabel(r.gender), ...s.questions.map((_, i) => r.answers?.[i])].map(cell).join(','));
     const blob = new Blob(['\uFEFF' + [head, ...rows].join('\n')], { type: 'text/csv;charset=utf-8' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = `${s.title}_결과.csv`; a.click();
@@ -962,11 +993,11 @@ async function renderResults(id) {
   };
 }
 
-/* ---------- 관리자(마스터) 화면 ---------- */
+/* ---------- master(마스터) 화면 ---------- */
 async function renderAdmin() {
   const tab = S.adminTab;
   app.innerHTML = `
-    <h1>관리자</h1>
+    <h1>master 관리</h1>
     <div class="tabs" role="tablist">
       ${[['students', '학생'], ['surveys', '설문'], ['teachers', '선생님'], ['settings', '비밀번호']].map(([k, l]) =>
         `<button role="tab" data-a="${k}" aria-selected="${tab === k}">${l}</button>`).join('')}
@@ -1075,10 +1106,10 @@ async function adminSurveys(body) {
 
 async function adminTeachers(body) {
   const roles = (await api.listRoles()).filter((r) => r.role === 'teacher').sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-  body.innerHTML = `<p class="sub">선생님 비밀번호로 로그인한 기록이에요. 권한을 해제하면 그 기기에서 로그아웃돼요.</p>
+  body.innerHTML = `<p class="sub">선생님으로 등록한 구글 계정이에요. 권한을 해제하면 다음 로그인 때 역할을 다시 골라야 해요.</p>
     <div class="cards">${roles.map((r) => `
       <div class="urow">
-        <div class="urow-main"><b>${esc(r.name)} 선생님</b><div class="small">로그인 ${fmtTime(r.createdAt)}</div></div>
+        <div class="urow-main"><b>${esc(r.name)} 선생님</b><div class="small">${esc(r.email || '')}</div><div class="small">등록 ${fmtTime(r.createdAt)}</div></div>
         <button class="btn danger sm" data-rm="${esc(r.uid)}">권한 해제</button>
       </div>`).join('') || '<div class="empty"><b>로그인한 선생님이 없어요</b></div>'}</div>`;
   body.onclick = async (e) => {
@@ -1093,12 +1124,12 @@ function adminSettings(body) {
   body.innerHTML = `<div class="box">
     <p class="sub" style="margin-top:0">비밀번호는 Firebase 서버에만 저장되고 사이트 코드에는 들어가지 않아요. 두 칸 모두 입력해야 저장돼요.</p>
     <label class="field"><span>새 선생님 비밀번호 (4자 이상)</span><input id="tp" type="password" autocomplete="new-password"></label>
-    <label class="field"><span>새 관리자 비밀번호 (4자 이상)</span><input id="mp" type="password" autocomplete="new-password"></label>
+    <label class="field"><span>새 master 비밀번호 (4자 이상)</span><input id="mp" type="password" autocomplete="new-password"></label>
     <button class="btn primary full" id="pinSave">저장하기</button></div>`;
   $('#pinSave').onclick = async () => {
     const teacherPin = $('#tp').value.trim(), masterPin = $('#mp').value.trim();
     if (teacherPin.length < 4 || masterPin.length < 4) return toast('두 비밀번호 모두 4자 이상 입력해주세요.');
-    if (teacherPin === masterPin) return toast('선생님과 관리자 비밀번호는 달라야 해요.');
+    if (teacherPin === masterPin) return toast('선생님과 master 비밀번호는 달라야 해요.');
     try { await api.setPins({ teacherPin, masterPin }); toast('비밀번호를 바꿨어요.'); $('#tp').value = ''; $('#mp').value = ''; }
     catch (e) { console.error(e); toast('저장하지 못했어요.'); }
   };
@@ -1200,7 +1231,7 @@ function showQR(s) {
 (async function start() {
   try { api = DEMO ? demoApi() : await firebaseApi(); }
   catch (e) { console.error(e); app.innerHTML = '<div class="empty"><b>서버에 연결하지 못했어요</b>인터넷 연결을 확인하고 새로고침해주세요.</div>'; return; }
-  api.onAuth((u) => { if (!S.staffLogin) enter(u); });
+  api.onAuth((u) => enter(u));
   addEventListener('hashchange', () => { if (ready()) route(); });
 })();
 </script>

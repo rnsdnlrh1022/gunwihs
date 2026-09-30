@@ -18,12 +18,12 @@ service cloud.firestore {
         && request.resource.data.masterPin is string && request.resource.data.masterPin.size() >= 4;
     }
 
-    // 선생님·관리자 역할: 비밀번호가 맞을 때만 만들어짐
+    // 선생님·관리자 역할: 구글 로그인 + 비밀번호가 맞을 때만 만들어짐
     match /roles/{uid} {
       allow get: if signedIn() && (request.auth.uid == uid || isMaster());
       allow list: if isMaster();
-      allow create: if signedIn() && request.auth.uid == uid
-        && request.auth.token.firebase.sign_in_provider == 'anonymous'
+      allow create: if isGoogle() && request.auth.uid == uid
+        && request.resource.data.email == request.auth.token.email
         && request.resource.data.name is string
         && request.resource.data.name.size() > 0 && request.resource.data.name.size() <= 20
         && ((request.resource.data.role == 'teacher' && request.resource.data.pin == secrets().teacherPin)
@@ -53,7 +53,8 @@ service cloud.firestore {
     }
 
     match /surveys/{surveyId} {
-      allow read: if signedIn();
+      // 선생님 전용 설문(staffOnly)은 선생님·master만 읽을 수 있음 → 학생은 제목도, 있는지도 알 수 없음
+      allow read: if signedIn() && (resource.data.staffOnly == false || isTeacher() || isMaster());
 
       // 작성자 표시(학년·반·번호 / 선생님 이름)가 진짜 본인 정보와 같아야 올라감
       allow create: if signedIn()
@@ -64,6 +65,9 @@ service cloud.firestore {
         && request.resource.data.questions is list
         && request.resource.data.questions.size() > 0
         && request.resource.data.questions.size() <= 30
+        && request.resource.data.grade in [0, 1, 2, 3, 9]
+        && request.resource.data.staffOnly == (request.resource.data.grade == 9)
+        && (request.resource.data.staffOnly == false || isTeacher() || isMaster())
         && ((request.resource.data.ownerRole == 'student'
               && request.resource.data.ownerName is string
               && request.resource.data.ownerName.size() > 0 && request.resource.data.ownerName.size() <= 20
@@ -77,10 +81,11 @@ service cloud.firestore {
       // 삭제: 만든 사람 또는 관리자
       allow delete: if signedIn() && (resource.data.ownerUid == request.auth.uid || isMaster());
 
-      // 응답: 등록한 학생만, 한 번만. 결과는 만든 사람·선생님·관리자가 볼 수 있음
+      // 응답: 학번을 등록한 학생(master 포함)과 선생님만, 한 번만. 결과는 만든 사람·선생님·관리자가 볼 수 있음
       match /responses/{uid} {
         allow create: if isGoogle() && request.auth.uid == uid
-          && exists(/databases/$(database)/documents/users/$(request.auth.uid));
+          && (isTeacher() || exists(/databases/$(database)/documents/users/$(request.auth.uid)))
+          && (get(/databases/$(database)/documents/surveys/$(surveyId)).data.grade != 9 || isTeacher());
         allow read: if signedIn() && (
           get(/databases/$(database)/documents/surveys/$(surveyId)).data.ownerUid == request.auth.uid
           || isTeacher() || isMaster() || request.auth.uid == uid);
