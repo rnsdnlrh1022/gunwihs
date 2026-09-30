@@ -2,49 +2,88 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // 학생 정보: 본인만 읽고 쓸 수 있음 (이메일은 다른 사람에게 절대 안 보임)
-    // 학년·반·번호(seat)는 seats 문서의 주인이 나일 때만 저장 가능
+    function signedIn() { return request.auth != null; }
+    function isGoogle() { return signedIn() && request.auth.token.firebase.sign_in_provider == 'google.com'; }
+    function hasRole() { return signedIn() && exists(/databases/$(database)/documents/roles/$(request.auth.uid)); }
+    function roleDoc() { return get(/databases/$(database)/documents/roles/$(request.auth.uid)).data; }
+    function isMaster() { return hasRole() && roleDoc().role == 'master'; }
+    function isTeacher() { return hasRole() && roleDoc().role == 'teacher'; }
+    function secrets() { return get(/databases/$(database)/documents/config/secrets).data; }
+
+    // 비밀번호 보관함: 아무도 읽을 수 없음 (규칙만 몰래 확인), 관리자만 변경 가능
+    match /config/{doc} {
+      allow read: if false;
+      allow write: if isMaster() && doc == 'secrets'
+        && request.resource.data.teacherPin is string && request.resource.data.teacherPin.size() >= 4
+        && request.resource.data.masterPin is string && request.resource.data.masterPin.size() >= 4;
+    }
+
+    // 선생님·관리자 역할: 비밀번호가 맞을 때만 만들어짐
+    match /roles/{uid} {
+      allow get: if signedIn() && (request.auth.uid == uid || isMaster());
+      allow list: if isMaster();
+      allow create: if signedIn() && request.auth.uid == uid
+        && request.auth.token.firebase.sign_in_provider == 'anonymous'
+        && request.resource.data.name is string
+        && request.resource.data.name.size() > 0 && request.resource.data.name.size() <= 20
+        && ((request.resource.data.role == 'teacher' && request.resource.data.pin == secrets().teacherPin)
+          || (request.resource.data.role == 'master' && request.resource.data.pin == secrets().masterPin));
+      allow delete: if signedIn() && (request.auth.uid == uid || isMaster());
+    }
+
+    // 학생 정보: 본인과 관리자만 볼 수 있음. 구글 로그인 학생만 등록 가능
     match /users/{uid} {
-      allow read: if request.auth != null && request.auth.uid == uid;
-      allow create, update: if request.auth != null && request.auth.uid == uid
+      allow get: if signedIn() && (request.auth.uid == uid || isMaster());
+      allow list: if isMaster();
+      allow create, update: if isGoogle() && request.auth.uid == uid
         && request.resource.data.grade in [1, 2, 3]
         && request.resource.data.classNo is int && request.resource.data.classNo >= 1 && request.resource.data.classNo <= 30
         && request.resource.data.number is int && request.resource.data.number >= 1 && request.resource.data.number <= 60
         && request.resource.data.seat == string(request.resource.data.grade) + '-'
              + string(request.resource.data.classNo) + '-' + string(request.resource.data.number)
         && getAfter(/databases/$(database)/documents/seats/$(request.resource.data.seat)).data.uid == uid;
+      allow delete: if isMaster();
     }
 
-    // 학년·반·번호 자리: 한 자리에는 한 계정만 (먼저 등록한 사람이 주인)
+    // 학년·반·번호 자리: 한 자리에 한 계정만
     match /seats/{seat} {
-      allow get: if request.auth != null;
-      allow create: if request.auth != null && request.resource.data.uid == request.auth.uid;
-      allow delete: if request.auth != null && resource.data.uid == request.auth.uid;
+      allow get: if signedIn();
+      allow create: if isGoogle() && request.resource.data.uid == request.auth.uid;
+      allow delete: if signedIn() && (resource.data.uid == request.auth.uid || isMaster());
     }
 
     match /surveys/{surveyId} {
-      allow read: if request.auth != null;
+      allow read: if signedIn();
 
-      allow create: if request.auth != null
+      // 작성자 표시(학년·반·번호 / 선생님 이름)가 진짜 본인 정보와 같아야 올라감
+      allow create: if signedIn()
         && request.resource.data.ownerUid == request.auth.uid
         && request.resource.data.title is string
         && request.resource.data.title.size() > 0
         && request.resource.data.title.size() <= 100
         && request.resource.data.questions is list
         && request.resource.data.questions.size() > 0
-        && request.resource.data.questions.size() <= 30;
+        && request.resource.data.questions.size() <= 30
+        && ((request.resource.data.ownerRole == 'student'
+              && request.resource.data.ownerName is string
+              && request.resource.data.ownerName.size() > 0 && request.resource.data.ownerName.size() <= 20
+              && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+              && request.resource.data.ownerLabel == get(/databases/$(database)/documents/users/$(request.auth.uid)).data.seat)
+          || (request.resource.data.ownerRole in ['teacher', 'master']
+              && hasRole()
+              && request.resource.data.ownerRole == roleDoc().role
+              && request.resource.data.ownerLabel == roleDoc().name));
 
-      allow delete: if request.auth != null && resource.data.ownerUid == request.auth.uid;
+      // 삭제: 만든 사람 또는 관리자
+      allow delete: if signedIn() && (resource.data.ownerUid == request.auth.uid || isMaster());
 
-      // 응답: 한 계정당 한 번만 (문서 이름 = 내 uid, 수정 불가)
-      // 학년·반·번호를 등록한 학생만 응답 가능
+      // 응답: 등록한 학생만, 한 번만. 결과는 만든 사람·선생님·관리자가 볼 수 있음
       match /responses/{uid} {
-        allow create: if request.auth != null && request.auth.uid == uid
+        allow create: if isGoogle() && request.auth.uid == uid
           && exists(/databases/$(database)/documents/users/$(request.auth.uid));
-        allow read: if request.auth != null && (
-          request.auth.uid == uid ||
+        allow read: if signedIn() && (
           get(/databases/$(database)/documents/surveys/$(surveyId)).data.ownerUid == request.auth.uid
-        );
+          || isTeacher() || isMaster() || request.auth.uid == uid);
       }
     }
   }

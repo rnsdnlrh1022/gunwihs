@@ -47,7 +47,12 @@
     border-bottom: 1px solid var(--line);
   }
   .top-in { max-width: 720px; margin: 0 auto; padding: 10px 16px; display: flex; align-items: center; gap: 8px; }
-  .brand { display: flex; align-items: center; gap: 8px; font-weight: 800; font-size: 17px; margin-right: auto; }
+  .brand { display: flex; align-items: center; gap: 8px; font-weight: 800; font-size: 17px; margin-right: auto; white-space: nowrap; }
+  @media (max-width: 440px) {
+    .top-in { gap: 6px; padding: 10px 12px; }
+    .brand-text { display: none; }
+    .pill { padding: 6px 10px; font-size: 13px; }
+  }
   .brand b { background: var(--blue); color: #fff; border-radius: 8px; padding: 2px 7px; font-size: 14px; }
   .pill {
     border: 1px solid var(--line); background: #fff; border-radius: 999px;
@@ -192,6 +197,11 @@
     background: var(--ink); color: #fff; padding: 12px 18px; border-radius: 12px; font-size: 15px; z-index: 60;
     max-width: calc(100% - 32px); text-align: center;
   }
+  .urow { display: flex; gap: 12px; align-items: center; background: var(--card); border-radius: var(--radius); padding: 14px 16px; }
+  .urow-main { flex: 1; min-width: 0; }
+  .urow-main a { color: var(--blue); }
+  .small { font-size: 13px; color: var(--sub); margin-top: 2px; word-break: break-all; }
+  .btn.sm { padding: 8px 12px; font-size: 14px; border-radius: 10px; flex: none; }
   .loading { text-align: center; color: var(--sub); padding: 40px 0; }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 </style>
@@ -199,8 +209,9 @@
 <body>
 <header class="top">
   <div class="top-in">
-    <a class="brand" href="#/"><b>GH</b> 학교 설문</a>
+    <a class="brand" href="#/"><b>GH</b> <span class="brand-text">학교 설문</span></a>
     <button id="installBtn" class="pill blue" hidden>⬇ 바로가기 설치</button>
+    <a id="adminBtn" class="pill blue" href="#/admin" hidden>관리</a>
     <a id="meBtn" class="pill" href="#/me" hidden></a>
   </div>
 </header>
@@ -268,6 +279,8 @@ function authError(e) {
     'auth/too-many-requests': '요청이 너무 많아요. 잠시 후 다시 시도해주세요.',
     'auth/unauthorized-domain': '이 주소가 파이어베이스 승인 도메인에 없어요. 관리자에게 알려주세요.',
     'auth/operation-not-allowed': '구글 로그인이 꺼져 있어요. 관리자에게 알려주세요.',
+    'bad-pin': '비밀번호가 맞지 않아요.',
+    'auth/admin-restricted-operation': '선생님·관리자 로그인(익명 로그인)이 꺼져 있어요. Firebase 설정을 확인해주세요.',
     'seat-taken': '이미 다른 계정이 등록한 학년·반·번호예요. 번호를 다시 확인하고, 맞다면 설문 관리자에게 알려주세요.'
   };
   return map[e?.code] || '문제가 생겼어요. 잠시 후 다시 시도해주세요.';
@@ -279,6 +292,7 @@ function authError(e) {
 function demoApi() {
   const load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } };
   const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
+  const DEMO_PINS = { teacher: '1234', master: '123456' };   // 체험 모드 전용 (실제 비밀번호는 Firebase에만 저장)
   let listener = null;
   return {
     onAuth(cb) { listener = cb; cb(load('demo:session', null)); },
@@ -286,9 +300,17 @@ function demoApi() {
       const email = prompt('체험 모드예요. 아무 이메일이나 입력하세요.\n(여러 명을 테스트하려면 이메일을 바꿔서 로그인)', 'student1@gmail.com');
       if (!email || !email.trim()) throw { code: 'auth/popup-closed-by-user' };
       const e = email.trim().toLowerCase();
-      const u = { uid: 'demo_' + e.replace(/[^a-z0-9]/g, '_'), email: e, name: e.split('@')[0] };
+      const u = { uid: 'demo_' + e.replace(/[^a-z0-9]/g, '_'), email: e, name: e.split('@')[0], isAnonymous: false };
       save('demo:session', u); listener?.(u); return u;
     },
+    async signInStaff(role, name, pin) {
+      if (pin !== DEMO_PINS[role]) throw { code: 'bad-pin' };
+      const nm = role === 'master' ? '관리자' : name;
+      const u = { uid: 'staff_' + role + '_' + encodeURIComponent(nm), isAnonymous: true, name: nm };
+      const roles = load('demo:roles', {}); roles[u.uid] = { role, name: nm, createdAt: Date.now() }; save('demo:roles', roles);
+      save('demo:session', u); listener?.(u); return u;
+    },
+    async getRole(uid) { return load('demo:roles', {})[uid] || null; },
     async logout() { try { localStorage.removeItem('demo:session'); } catch {} listener?.(null); },
     async getProfile(uid) { return load('demo:users', {})[uid] || null; },
     async saveProfile(uid, p) {
@@ -296,9 +318,11 @@ function demoApi() {
       if (seats[p.seat] && seats[p.seat] !== uid) throw { code: 'seat-taken' };
       const old = users[uid]?.seat;
       if (old && old !== p.seat) delete seats[old];
-      seats[p.seat] = uid; users[uid] = { ...users[uid], ...p };
+      seats[p.seat] = uid;
+      users[uid] = { createdAt: Date.now(), ...users[uid], ...p, lastLoginAt: Date.now() };
       save('demo:seats', seats); save('demo:users', users);
     },
+    async touchLogin(uid) { const u = load('demo:users', {}); if (u[uid]) { u[uid].lastLoginAt = Date.now(); save('demo:users', u); } },
     async listSurveys() { return Object.values(load('demo:surveys', {})).sort((a, b) => b.createdAt - a.createdAt); },
     async getSurvey(id) { return load('demo:surveys', {})[id] || null; },
     async createSurvey(d) {
@@ -315,7 +339,19 @@ function demoApi() {
       if (r[id][uid]) throw new Error('already');
       r[id][uid] = { ...d, createdAt: Date.now() }; save('demo:responses', r);
     },
-    async listResponses(id) { return Object.values(load('demo:responses', {})[id] || {}); }
+    async listResponses(id) { return Object.values(load('demo:responses', {})[id] || {}); },
+    async countResponses(id) { return Object.keys(load('demo:responses', {})[id] || {}).length; },
+    // ----- 관리자 -----
+    async listUsers() { return Object.entries(load('demo:users', {})).map(([uid, d]) => ({ uid, ...d })); },
+    async resetUser(uid, seat) {
+      const users = load('demo:users', {}), seats = load('demo:seats', {});
+      delete users[uid]; if (seat && seats[seat] === uid) delete seats[seat];
+      save('demo:users', users); save('demo:seats', seats);
+    },
+    async resetAllUsers() { save('demo:users', {}); save('demo:seats', {}); },
+    async listRoles() { return Object.entries(load('demo:roles', {})).map(([uid, d]) => ({ uid, ...d })); },
+    async removeRole(uid) { const r = load('demo:roles', {}); delete r[uid]; save('demo:roles', r); },
+    async setPins() { toast('체험 모드에서는 비밀번호를 바꿀 수 없어요.'); }
   };
 }
 
@@ -326,7 +362,7 @@ async function firebaseApi() {
   const fbApp = initializeApp(firebaseConfig);
   const auth = A.getAuth(fbApp); auth.languageCode = 'ko';
   const db = F.getFirestore(fbApp);
-  const toUser = (u) => (u ? { uid: u.uid, email: u.email, name: u.displayName } : null);
+  const toUser = (u) => (u ? { uid: u.uid, email: u.email, name: u.displayName, isAnonymous: u.isAnonymous } : null);
   const ms = (v) => (v?.toMillis ? v.toMillis() : v || 0);
   const withId = (d) => ({ ...d.data(), id: d.id, createdAt: ms(d.data().createdAt) });
   A.getRedirectResult(auth).catch((e) => toast(authError(e), 4000));
@@ -341,9 +377,23 @@ async function firebaseApi() {
         throw e;
       }
     },
+    // 선생님·관리자: 익명 로그인 후, 비밀번호가 맞을 때만 서버 규칙이 역할 문서를 만들어줌
+    async signInStaff(role, name, pin) {
+      const cred = await A.signInAnonymously(auth);
+      try {
+        await F.setDoc(F.doc(db, 'roles', cred.user.uid), {
+          role, name: role === 'master' ? '관리자' : name, pin, createdAt: F.serverTimestamp()
+        });
+      } catch (e) {
+        try { await cred.user.delete(); } catch {}
+        await A.signOut(auth).catch(() => {});
+        throw { code: e.code === 'permission-denied' ? 'bad-pin' : e.code };
+      }
+      return toUser(cred.user);
+    },
+    async getRole(uid) { const s = await F.getDoc(F.doc(db, 'roles', uid)); return s.exists() ? s.data() : null; },
     logout: () => A.signOut(auth),
     async getProfile(uid) { const s = await F.getDoc(F.doc(db, 'users', uid)); return s.exists() ? s.data() : null; },
-    // 학년·반·번호는 한 계정만 가질 수 있어요 (seats 컬렉션으로 서버에서 확인)
     async saveProfile(uid, p) {
       const seatRef = F.doc(db, 'seats', p.seat), userRef = F.doc(db, 'users', uid);
       const [seatSnap, userSnap] = await Promise.all([F.getDoc(seatRef), F.getDoc(userRef)]);
@@ -352,12 +402,14 @@ async function firebaseApi() {
       const batch = F.writeBatch(db);
       if (old && old !== p.seat) batch.delete(F.doc(db, 'seats', old));
       if (!seatSnap.exists()) batch.set(seatRef, { uid });
-      batch.set(userRef, { ...p, updatedAt: F.serverTimestamp() }, { merge: true });
+      const extra = userSnap.exists() ? {} : { createdAt: F.serverTimestamp() };
+      batch.set(userRef, { ...p, ...extra, updatedAt: F.serverTimestamp(), lastLoginAt: F.serverTimestamp() }, { merge: true });
       try { await batch.commit(); }
       catch (e) { if (e.code === 'permission-denied') throw { code: 'seat-taken' }; throw e; }
     },
+    touchLogin: (uid) => F.updateDoc(F.doc(db, 'users', uid), { lastLoginAt: F.serverTimestamp() }),
     async listSurveys() {
-      const s = await F.getDocs(F.query(F.collection(db, 'surveys'), F.orderBy('createdAt', 'desc'), F.limit(200)));
+      const s = await F.getDocs(F.query(F.collection(db, 'surveys'), F.orderBy('createdAt', 'desc'), F.limit(300)));
       return s.docs.map(withId);
     },
     async getSurvey(id) { const s = await F.getDoc(F.doc(db, 'surveys', id)); return s.exists() ? withId(s) : null; },
@@ -365,62 +417,178 @@ async function firebaseApi() {
     deleteSurvey: (id) => F.deleteDoc(F.doc(db, 'surveys', id)),
     async getMyResponse(id, uid) { const s = await F.getDoc(F.doc(db, 'surveys', id, 'responses', uid)); return s.exists() ? s.data() : null; },
     submitResponse: (id, uid, d) => F.setDoc(F.doc(db, 'surveys', id, 'responses', uid), { ...d, createdAt: F.serverTimestamp() }),
-    async listResponses(id) { const s = await F.getDocs(F.collection(db, 'surveys', id, 'responses')); return s.docs.map((d) => d.data()); }
+    async listResponses(id) { const s = await F.getDocs(F.collection(db, 'surveys', id, 'responses')); return s.docs.map((d) => d.data()); },
+    async countResponses(id) { const s = await F.getCountFromServer(F.collection(db, 'surveys', id, 'responses')); return s.data().count; },
+    // ----- 관리자 -----
+    async listUsers() {
+      const s = await F.getDocs(F.collection(db, 'users'));
+      return s.docs.map((d) => { const x = d.data(); return { ...x, uid: d.id, createdAt: ms(x.createdAt), lastLoginAt: ms(x.lastLoginAt) }; });
+    },
+    async resetUser(uid, seat) {
+      const b = F.writeBatch(db);
+      b.delete(F.doc(db, 'users', uid));
+      if (seat) b.delete(F.doc(db, 'seats', seat));
+      await b.commit();
+    },
+    async resetAllUsers(list) {
+      for (let i = 0; i < list.length; i += 200) {
+        const b = F.writeBatch(db);
+        list.slice(i, i + 200).forEach((u) => { b.delete(F.doc(db, 'users', u.uid)); if (u.seat) b.delete(F.doc(db, 'seats', u.seat)); });
+        await b.commit();
+      }
+    },
+    async listRoles() {
+      const s = await F.getDocs(F.collection(db, 'roles'));
+      return s.docs.map((d) => { const x = d.data(); return { uid: d.id, role: x.role, name: x.name, createdAt: ms(x.createdAt) }; });
+    },
+    removeRole: (uid) => F.deleteDoc(F.doc(db, 'roles', uid)),
+    setPins: (p) => F.setDoc(F.doc(db, 'config', 'secrets'), p)
   };
 }
 
 /* =================================================================
    ③ 화면
 ================================================================= */
-const S = { user: null, profile: null, filter: { q: '', grade: 0, tab: 'all' } };
+const S = { user: null, profile: null, role: null, staffName: '', staffLogin: false, adminTab: 'students', filter: { q: '', grade: 0, tab: 'all' } };
 let api;
+const isStaff = () => S.role === 'teacher' || S.role === 'master';
+const isMaster = () => S.role === 'master';
+const ready = () => !!S.user && (isStaff() || !!S.profile?.number);
+const seatLabel = (seat) => { const [g, c, n] = String(seat || '').split('-'); return n ? `${g}학년 ${c}반 ${n}번` : ''; };
+const ownerText = (s) => {
+  if (s.ownerRole === 'student') return [seatLabel(s.ownerLabel), s.ownerName].filter(Boolean).join(' ');
+  if (s.ownerRole === 'teacher') return `${s.ownerLabel} 선생님`;
+  if (s.ownerRole === 'master') return '관리자';
+  return s.ownerName || '';
+};
+const fmtTime = (t) => t ? new Date(t).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '-';
 
 function updateHeader() {
-  const me = $('#meBtn');
-  if (S.user && S.profile?.number) {
-    me.hidden = false;
-    me.textContent = `${S.profile.grade}-${S.profile.classNo} ${S.profile.number}번`;
-  } else me.hidden = true;
+  const me = $('#meBtn'), adm = $('#adminBtn');
+  adm.hidden = !isMaster();
+  if (!ready()) { me.hidden = true; return; }
+  me.hidden = false;
+  me.textContent = S.role === 'teacher' ? `${S.staffName} 선생님`
+    : S.role === 'master' ? '마스터' : `${S.profile.grade}-${S.profile.classNo} ${S.profile.number}번`;
 }
 
 function route() {
   const [a, b, c] = location.hash.replace(/^#\/?/, '').split('/');
   window.scrollTo(0, 0);
   if (a === 'new') return renderBuilder();
-  if (a === 'me') return renderProfile(false);
+  if (a === 'me') return isStaff() ? renderStaffMe() : renderProfile(false);
+  if (a === 'admin') return isMaster() ? renderAdmin() : renderList();
   if (a === 's' && b && c === 'results') return renderResults(b);
   if (a === 's' && b) return renderSurvey(b);
   renderList();
 }
 
-/* ---------- 로그인 (구글 계정) ---------- */
+// 로그인 상태가 바뀌면 역할(학생/선생님/관리자)을 확인하고 화면을 보여줌
+async function enter(u) {
+  S.user = u; S.role = null; S.profile = null; S.staffName = '';
+  if (!u) {
+    if (/^#\/(me|admin|new)/.test(location.hash)) history.replaceState(null, '', location.pathname + location.search);
+    updateHeader(); return renderLogin();
+  }
+  app.innerHTML = '<div class="loading">불러오는 중…</div>';
+  try {
+    if (u.isAnonymous) {
+      const r = await api.getRole(u.uid);
+      if (!r) { await api.logout(); return; }
+      S.role = r.role; S.staffName = r.name || '';
+    } else {
+      S.role = 'student';
+      S.profile = await api.getProfile(u.uid);
+      if (S.profile?.number) api.touchLogin(u.uid).catch(() => {});
+    }
+  } catch (e) { console.error(e); }
+  updateHeader();
+  if (S.role === 'student' && !S.profile?.number) return renderProfile(true);
+  route();
+}
+
+/* ---------- 로그인 (학생: 구글 / 선생님: 이름+비밀번호 / 관리자: 비밀번호) ---------- */
+let loginTab = 'student';
 function renderLogin() {
   app.innerHTML = `
   <section class="auth">
-    <h1>구글 계정으로 시작하기</h1>
-    <p class="sub">한 사람당 한 번만 참여할 수 있도록 구글 계정으로 확인해요. 이메일은 다른 학생에게 보이지 않아요.</p>
-    ${IN_APP ? `<div class="demo" style="margin:0 0 16px">카카오톡·인스타그램 같은 앱 안에서는 구글 로그인이 막혀 있어요.
-      오른쪽 위 메뉴(⋮ 또는 …)에서 <b>다른 브라우저로 열기</b>를 눌러주세요.
-      <button class="btn soft full" id="copyLink" style="margin-top:10px">주소 복사하기</button></div>` : ''}
-    <label class="check"><input type="checkbox" id="agree">
-      <span>개인정보(구글 이메일, 학년·반·번호·성별) 수집과 이용에 동의해요. 설문 참여와 중복 참여 방지에만 쓰여요.</span></label>
-    <button class="btn google full" id="googleBtn">Google 계정으로 로그인</button>
-    ${DEMO ? `<div class="demo">지금은 체험 모드예요. 버튼을 누르면 아무 이메일로 로그인할 수 있어요. 데이터는 이 기기에만 저장돼요.</div>` : ''}
+    <h1>로그인</h1>
+    <div class="tabs" role="tablist">
+      ${[['student', '학생'], ['teacher', '선생님'], ['master', '관리자']].map(([k, l]) =>
+        `<button role="tab" data-t="${k}" aria-selected="${loginTab === k}">${l}</button>`).join('')}
+    </div>
+    <div id="loginBody"></div>
   </section>`;
-  const copy = $('#copyLink');
-  if (copy) copy.onclick = async () => {
-    try { await navigator.clipboard.writeText(location.href); toast('주소를 복사했어요. 크롬이나 사파리에 붙여넣어 주세요.', 4000); }
-    catch { prompt('아래 주소를 복사하세요', location.href); }
+  app.querySelector('.tabs').onclick = (e) => { const b = e.target.closest('[data-t]'); if (!b) return; loginTab = b.dataset.t; renderLogin(); };
+  const body = $('#loginBody');
+
+  if (loginTab === 'student') {
+    body.innerHTML = `
+      <p class="sub">한 사람당 한 번만 참여할 수 있도록 구글 계정으로 확인해요. 이메일은 다른 학생에게 보이지 않아요.</p>
+      ${IN_APP ? `<div class="demo" style="margin:0 0 16px">카카오톡·인스타그램 같은 앱 안에서는 구글 로그인이 막혀 있어요.
+        오른쪽 위 메뉴(⋮ 또는 …)에서 <b>다른 브라우저로 열기</b>를 눌러주세요.
+        <button class="btn soft full" id="copyLink" style="margin-top:10px">주소 복사하기</button></div>` : ''}
+      <label class="check"><input type="checkbox" id="agree">
+        <span>개인정보(구글 이메일, 학년·반·번호·성별) 수집과 이용에 동의해요. 설문 참여와 중복 참여 방지에 쓰이고, 설문을 올리면 학년·반·번호가 작성자로 표시돼요.</span></label>
+      <button class="btn google full" id="googleBtn">Google 계정으로 로그인</button>
+      ${DEMO ? `<div class="demo">체험 모드예요. 아무 이메일로 로그인할 수 있고, 데이터는 이 기기에만 저장돼요.</div>` : ''}`;
+    const copy = $('#copyLink');
+    if (copy) copy.onclick = async () => {
+      try { await navigator.clipboard.writeText(location.href); toast('주소를 복사했어요. 크롬이나 사파리에 붙여넣어 주세요.', 4000); }
+      catch { prompt('아래 주소를 복사하세요', location.href); }
+    };
+    const btn = $('#googleBtn');
+    btn.onclick = async () => {
+      if (!$('#agree').checked) return toast('개인정보 수집에 동의해주세요.');
+      if (IS_KAKAO && !DEMO) { location.href = 'kakaotalk://web/openExternal?url=' + encodeURIComponent(location.href); return; }
+      btn.disabled = true; btn.textContent = '로그인하는 중…';
+      try { await api.signIn(); }
+      catch (e) { console.error(e); toast(authError(e), 4000); }
+      btn.disabled = false; btn.textContent = 'Google 계정으로 로그인';
+    };
+    return;
+  }
+
+  const teacher = loginTab === 'teacher';
+  body.innerHTML = `
+    <p class="sub">${teacher ? '이름과 선생님 비밀번호를 입력해주세요. 선생님은 모든 설문의 결과를 볼 수 있어요.' : '관리자 비밀번호를 입력해주세요.'}</p>
+    ${teacher ? '<label class="field"><span>이름</span><input id="staffName" maxlength="20" autocomplete="name" placeholder="예: 김민지"></label>' : ''}
+    <label class="field"><span>비밀번호</span><input id="staffPin" type="password" inputmode="numeric" autocomplete="off" maxlength="20"></label>
+    <button class="btn primary full" id="staffBtn">로그인</button>
+    ${DEMO ? `<div class="demo">체험 모드 비밀번호: 선생님 1234, 관리자 123456</div>` : ''}`;
+  const btn = $('#staffBtn');
+  const go = async () => {
+    const name = teacher ? $('#staffName').value.trim() : '';
+    const pin = $('#staffPin').value.trim();
+    if (teacher && !name) return toast('이름을 입력해주세요.');
+    if (!pin) return toast('비밀번호를 입력해주세요.');
+    btn.disabled = true; btn.textContent = '확인하는 중…';
+    S.staffLogin = true;
+    try {
+      const u = await api.signInStaff(loginTab, name, pin);
+      S.staffLogin = false;
+      await enter(u);
+      toast(teacher ? `${name} 선생님, 환영해요!` : '관리자로 로그인했어요.');
+    } catch (e) {
+      S.staffLogin = false; console.error(e);
+      toast(authError(e), 4000);
+      btn.disabled = false; btn.textContent = '로그인';
+    }
   };
-  const btn = $('#googleBtn');
-  btn.onclick = async () => {
-    if (!$('#agree').checked) return toast('개인정보 수집에 동의해주세요.');
-    if (IS_KAKAO && !DEMO) { location.href = 'kakaotalk://web/openExternal?url=' + encodeURIComponent(location.href); return; }
-    btn.disabled = true; btn.textContent = '로그인하는 중…';
-    try { await api.signIn(); }
-    catch (e) { console.error(e); toast(authError(e), 4000); }
-    btn.disabled = false; btn.textContent = 'Google 계정으로 로그인';
-  };
+  btn.onclick = go;
+  $('#staffPin').onkeydown = (e) => { if (e.key === 'Enter') go(); };
+}
+
+function renderStaffMe() {
+  app.innerHTML = `
+  <section class="auth">
+    <a class="back" href="#/">← 목록으로</a>
+    <h1>${S.role === 'master' ? '마스터 계정' : esc(S.staffName) + ' 선생님'}</h1>
+    <p class="sub">${S.role === 'master' ? '모든 설문과 학생 계정을 관리할 수 있어요.' : '모든 설문의 결과를 볼 수 있어요.'}</p>
+    ${S.role === 'master' ? '<a class="btn soft full" href="#/admin" style="margin-bottom:8px">관리 화면으로</a>' : ''}
+    <button class="btn ghost full" id="logoutBtn">로그아웃</button>
+  </section>`;
+  $('#logoutBtn').onclick = () => { if (confirm('로그아웃할까요?')) api.logout(); };
 }
 
 /* ---------- 학년·반·번호·성별 저장 ---------- */
@@ -520,6 +688,7 @@ function cardHtml(s) {
       <div class="meta">
         <span class="tag blue">${gradeLabel(s.grade)}</span>
         <span class="tag">질문 ${s.questions.length}개</span>
+        ${ownerText(s) ? `<span class="tag">${esc(ownerText(s))}</span>` : ''}
         ${s.ownerUid === S.user.uid ? '<span class="tag">내 설문</span>' : ''}
       </div>
     </div></a>`;
@@ -535,9 +704,12 @@ async function renderSurvey(id) {
 
   const d = ddayInfo(s.deadline);
   const isOwner = s.ownerUid === S.user.uid;
-  const wrongGrade = s.grade && s.grade !== S.profile.grade;
+  const canResults = isOwner || isStaff();
+  const canDelete = isOwner || isMaster();
+  const wrongGrade = !isStaff() && s.grade && s.grade !== S.profile.grade;
   let body;
-  if (mine) body = `<div class="notice"><b>참여를 완료했어요 ✓</b><p>응답은 한 번만 할 수 있어요.</p></div>`;
+  if (isStaff()) body = `<div class="notice"><b>${S.role === 'master' ? '관리자' : '선생님'} 계정이에요</b><p>응답은 학생만 할 수 있어요. 결과 보기에서 응답을 확인하세요.</p></div>`;
+  else if (mine) body = `<div class="notice"><b>참여를 완료했어요 ✓</b><p>응답은 한 번만 할 수 있어요.</p></div>`;
   else if (d.closed) body = `<div class="notice"><b>마감된 설문이에요</b><p>${esc(s.deadline)}에 마감되었어요.</p></div>`;
   else if (wrongGrade) body = `<div class="notice"><b>${s.grade}학년 대상 설문이에요</b><p>내 정보의 학년이 다르면 참여할 수 없어요.</p></div>`;
   else body = `<form id="answerForm" novalidate>${s.questions.map(questionHtml).join('')}
@@ -549,19 +721,20 @@ async function renderSurvey(id) {
       <div class="meta" style="margin:0 0 8px">
         <span class="tag blue">${gradeLabel(s.grade)}</span>
         <span class="tag">${s.deadline ? '마감 ' + esc(s.deadline) + ' (' + d.text + ')' : '마감일 없음'}</span>
+        ${ownerText(s) ? `<span class="tag">작성 ${esc(ownerText(s))}</span>` : ''}
       </div>
       <h1 style="margin-top:0">${esc(s.title)}</h1>
       ${s.desc ? `<p class="sub" style="margin:0;white-space:pre-wrap">${esc(s.desc)}</p>` : ''}
       <div class="row" style="margin-top:16px">
-        ${isOwner ? `<a class="btn soft" href="#/s/${esc(id)}/results">결과 보기</a>` : ''}
+        ${canResults ? `<a class="btn soft" href="#/s/${esc(id)}/results">결과 보기</a>` : ''}
         <button class="btn soft" id="qrBtn">QR 코드</button>
-        ${isOwner ? '<button class="btn danger" id="delBtn">삭제</button>' : ''}
+        ${canDelete ? '<button class="btn danger" id="delBtn">삭제</button>' : ''}
       </div>
     </div>
     ${body}`;
 
   $('#qrBtn').onclick = () => showQR(s);
-  if (isOwner) $('#delBtn').onclick = async () => {
+  if (canDelete) $('#delBtn').onclick = async () => {
     if (!confirm('이 설문을 삭제할까요? 삭제하면 되돌릴 수 없어요.')) return;
     try { await api.deleteSurvey(id); toast('삭제했어요.'); location.hash = '#/'; }
     catch (e) { console.error(e); toast('삭제하지 못했어요.'); }
@@ -618,6 +791,8 @@ function renderBuilder() {
     <h1>새 설문 만들기</h1>
     <p class="sub">질문을 추가하고 선택지를 적으면 바로 설문이 만들어져요.</p>
     <div class="box">
+      ${S.role === 'student' ? `<label class="field"><span>작성자 이름</span><input id="bName" maxlength="20" autocomplete="name" placeholder="예: 서은수" value="${esc((() => { try { return localStorage.getItem('ownerName') || ''; } catch { return ''; } })())}">
+        <small class="small">설문 목록에 "${esc(seatLabel(S.profile.seat))} 이름"으로 표시돼요.</small></label>` : ''}
       <label class="field"><span>설문 제목</span><input id="bTitle" maxlength="100" placeholder="예: 체육대회 종목 투표"></label>
       <label class="field"><span>설명 (선택)</span><textarea id="bDesc" maxlength="500" placeholder="설문 목적이나 안내를 적어주세요"></textarea></label>
       <div class="field"><span>대상 학년</span><div class="seg">
@@ -692,6 +867,8 @@ function renderBuilder() {
     draft.desc = $('#bDesc').value.trim();
     draft.grade = Number(document.querySelector('input[name=bGrade]:checked').value);
     draft.deadline = $('#bDeadline').value;
+    const ownerName = S.role === 'student' ? $('#bName').value.trim() : '';
+    if (S.role === 'student' && !ownerName) { $('#bName').focus(); return toast('작성자 이름을 입력해주세요.'); }
     if (!draft.title) { $('#bTitle').focus(); return toast('설문 제목을 입력해주세요.'); }
     for (const [i, q] of draft.questions.entries()) {
       if (!q.title.trim()) return toast(`${i + 1}번 질문 내용을 입력해주세요.`);
@@ -705,8 +882,10 @@ function renderBuilder() {
     try {
       const id = await api.createSurvey({
         title: draft.title, desc: draft.desc, grade: draft.grade, deadline: draft.deadline,
-        questions, ownerUid: S.user.uid, ownerGrade: S.profile.grade
+        questions, ownerUid: S.user.uid,
+        ...(S.role === 'student' ? { ownerRole: 'student', ownerLabel: S.profile.seat, ownerName } : { ownerRole: S.role, ownerLabel: S.staffName })
       });
+      if (ownerName) { try { localStorage.setItem('ownerName', ownerName); } catch {} }
       toast('설문을 올렸어요!');
       location.hash = '#/s/' + id;
     } catch (e) { console.error(e); toast('올리지 못했어요. 다시 시도해주세요.'); btn.disabled = false; btn.textContent = '설문 올리기'; }
@@ -714,13 +893,13 @@ function renderBuilder() {
 }
 const newQuestion = () => ({ type: 'single', title: '', options: ['', ''], required: true });
 
-/* ---------- 결과 보기 (만든 사람만) ---------- */
+/* ---------- 결과 보기 (만든 사람·선생님·관리자) ---------- */
 async function renderResults(id) {
   app.innerHTML = '<div class="loading">결과를 모으는 중…</div>';
   let s, all;
   try {
     s = await api.getSurvey(id);
-    if (!s || s.ownerUid !== S.user.uid) { app.innerHTML = '<div class="empty"><b>설문을 만든 사람만 결과를 볼 수 있어요</b><a href="#/">목록으로 돌아가기</a></div>'; return; }
+    if (!s || (s.ownerUid !== S.user.uid && !isStaff())) { app.innerHTML = '<div class="empty"><b>설문을 만든 사람과 선생님만 결과를 볼 수 있어요</b><a href="#/">목록으로 돌아가기</a></div>'; return; }
     all = await api.listResponses(id);
   } catch (e) { console.error(e); app.innerHTML = '<div class="empty"><b>결과를 불러오지 못했어요</b><a href="#/">목록으로 돌아가기</a></div>'; return; }
 
@@ -780,6 +959,148 @@ async function renderResults(id) {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob); a.download = `${s.title}_결과.csv`; a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  };
+}
+
+/* ---------- 관리자(마스터) 화면 ---------- */
+async function renderAdmin() {
+  const tab = S.adminTab;
+  app.innerHTML = `
+    <h1>관리자</h1>
+    <div class="tabs" role="tablist">
+      ${[['students', '학생'], ['surveys', '설문'], ['teachers', '선생님'], ['settings', '비밀번호']].map(([k, l]) =>
+        `<button role="tab" data-a="${k}" aria-selected="${tab === k}">${l}</button>`).join('')}
+    </div>
+    <div id="adminBody"><div class="loading">불러오는 중…</div></div>`;
+  app.querySelector('.tabs').onclick = (e) => { const b = e.target.closest('[data-a]'); if (!b) return; S.adminTab = b.dataset.a; renderAdmin(); };
+  const body = $('#adminBody');
+  try {
+    if (tab === 'students') await adminStudents(body);
+    else if (tab === 'surveys') await adminSurveys(body);
+    else if (tab === 'teachers') await adminTeachers(body);
+    else adminSettings(body);
+  } catch (e) {
+    console.error(e);
+    body.innerHTML = '<div class="empty"><b>불러오지 못했어요</b>Firebase 보안 규칙이 최신 버전인지 확인해주세요.</div>';
+  }
+}
+
+async function adminStudents(body) {
+  const [users, surveys] = await Promise.all([api.listUsers(), api.listSurveys()]);
+  const made = {};
+  surveys.forEach((s) => { (made[s.ownerUid] = made[s.ownerUid] || []).push(s); });
+  const f = { grade: 0, q: '', sort: 'seat' };
+  body.innerHTML = `
+    <div class="box" style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+      <div style="margin-right:auto"><div class="big-num">${users.length}명</div><p class="sub" style="margin:4px 0 0">등록한 학생</p></div>
+      <button class="btn danger" id="resetAll">전체 초기화</button>
+    </div>
+    <input id="uq" class="input" type="search" placeholder="번호(예: 2-3-15)나 이메일로 검색">
+    <div class="chips" id="ug">${[0, 1, 2, 3].map((g) => `<button data-v="${g}" aria-pressed="${g === 0}">${g ? g + '학년' : '전체'}</button>`).join('')}</div>
+    <div class="chips" id="us" style="margin-top:-8px">
+      <button data-v="seat" aria-pressed="true">번호순</button><button data-v="login" aria-pressed="false">최근 접속순</button>
+    </div>
+    <div id="ulist" class="cards"></div>`;
+  const draw = () => {
+    const q = f.q.trim().toLowerCase();
+    let list = users.filter((u) => (!f.grade || u.grade === f.grade) &&
+      (!q || String(u.seat).includes(q) || String(u.email || '').toLowerCase().includes(q)));
+    list.sort(f.sort === 'login' ? (a, b) => (b.lastLoginAt || 0) - (a.lastLoginAt || 0)
+      : (a, b) => a.grade - b.grade || a.classNo - b.classNo || a.number - b.number);
+    $('#ulist').innerHTML = list.length ? list.map((u) => {
+      const mine = made[u.uid] || [];
+      return `<div class="urow">
+        <div class="urow-main">
+          <b>${u.grade}학년 ${u.classNo}반 ${u.number}번</b> <span class="tag">${genderLabel(u.gender)}</span>
+          <div class="small">${esc(u.email || '')}</div>
+          <div class="small">가입 ${fmtTime(u.createdAt)} · 마지막 접속 ${fmtTime(u.lastLoginAt)}</div>
+          ${mine.length ? `<div class="small">올린 설문 ${mine.length}개: ${mine.map((s) => `<a href="#/s/${esc(s.id)}">${esc(s.title)}</a>`).join(', ')}</div>` : ''}
+        </div>
+        <button class="btn danger sm" data-reset="${esc(u.uid)}">초기화</button>
+      </div>`;
+    }).join('') : '<div class="empty"><b>학생이 없어요</b></div>';
+  };
+  const chips = (el, key, num) => (el.onclick = (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    f[key] = num ? Number(b.dataset.v) : b.dataset.v;
+    el.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', x === b)); draw();
+  });
+  chips($('#ug'), 'grade', true); chips($('#us'), 'sort', false);
+  $('#uq').oninput = (e) => { f.q = e.target.value; draw(); };
+  $('#ulist').onclick = async (e) => {
+    const b = e.target.closest('[data-reset]'); if (!b) return;
+    const u = users.find((x) => x.uid === b.dataset.reset);
+    if (!confirm(`${u.grade}학년 ${u.classNo}반 ${u.number}번 학생의 등록을 초기화할까요?\n다음에 로그인하면 학년·반·번호를 다시 입력하게 돼요.`)) return;
+    b.disabled = true;
+    try { await api.resetUser(u.uid, u.seat); toast('초기화했어요.'); renderAdmin(); }
+    catch (err) { console.error(err); toast('초기화하지 못했어요.'); b.disabled = false; }
+  };
+  $('#resetAll').onclick = async () => {
+    if (!users.length) return toast('초기화할 학생이 없어요.');
+    const t = prompt(`학생 ${users.length}명의 등록을 모두 초기화해요.\n되돌릴 수 없어요. 계속하려면 "초기화"라고 입력하세요.`);
+    if (t !== '초기화') return;
+    try { await api.resetAllUsers(users); toast('전체 초기화했어요.'); renderAdmin(); }
+    catch (err) { console.error(err); toast('초기화하지 못했어요.'); }
+  };
+  draw();
+}
+
+async function adminSurveys(body) {
+  const surveys = await api.listSurveys();
+  body.innerHTML = `<p class="sub">전체 설문 ${surveys.length}개 · 모든 설문의 결과를 보고 삭제할 수 있어요.</p>
+    <div class="cards">${surveys.map((s) => `
+      <div class="urow">
+        <div class="urow-main">
+          <b><a href="#/s/${esc(s.id)}">${esc(s.title)}</a></b>
+          <div class="small">작성 ${esc(ownerText(s) || '알 수 없음')} · ${fmtTime(s.createdAt)} · ${gradeLabel(s.grade)} · ${ddayInfo(s.deadline).text}</div>
+          <div class="small">응답 <span data-count="${esc(s.id)}">…</span>명</div>
+        </div>
+        <div class="row" style="flex:none">
+          <a class="btn soft sm" href="#/s/${esc(s.id)}/results">결과</a>
+          <button class="btn danger sm" data-del="${esc(s.id)}">삭제</button>
+        </div>
+      </div>`).join('') || '<div class="empty"><b>설문이 없어요</b></div>'}</div>`;
+  surveys.forEach(async (s) => {
+    try { const n = await api.countResponses(s.id); const el = body.querySelector(`[data-count="${CSS.escape(s.id)}"]`); if (el) el.textContent = n; }
+    catch (e) { console.error(e); }
+  });
+  body.onclick = async (e) => {
+    const b = e.target.closest('[data-del]'); if (!b) return;
+    const s = surveys.find((x) => x.id === b.dataset.del);
+    if (!confirm(`"${s.title}" 설문을 삭제할까요? 되돌릴 수 없어요.`)) return;
+    try { await api.deleteSurvey(s.id); toast('삭제했어요.'); renderAdmin(); }
+    catch (err) { console.error(err); toast('삭제하지 못했어요.'); }
+  };
+}
+
+async function adminTeachers(body) {
+  const roles = (await api.listRoles()).filter((r) => r.role === 'teacher').sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  body.innerHTML = `<p class="sub">선생님 비밀번호로 로그인한 기록이에요. 권한을 해제하면 그 기기에서 로그아웃돼요.</p>
+    <div class="cards">${roles.map((r) => `
+      <div class="urow">
+        <div class="urow-main"><b>${esc(r.name)} 선생님</b><div class="small">로그인 ${fmtTime(r.createdAt)}</div></div>
+        <button class="btn danger sm" data-rm="${esc(r.uid)}">권한 해제</button>
+      </div>`).join('') || '<div class="empty"><b>로그인한 선생님이 없어요</b></div>'}</div>`;
+  body.onclick = async (e) => {
+    const b = e.target.closest('[data-rm]'); if (!b) return;
+    if (!confirm('이 선생님 로그인의 권한을 해제할까요?')) return;
+    try { await api.removeRole(b.dataset.rm); toast('해제했어요.'); renderAdmin(); }
+    catch (err) { console.error(err); toast('해제하지 못했어요.'); }
+  };
+}
+
+function adminSettings(body) {
+  body.innerHTML = `<div class="box">
+    <p class="sub" style="margin-top:0">비밀번호는 Firebase 서버에만 저장되고 사이트 코드에는 들어가지 않아요. 두 칸 모두 입력해야 저장돼요.</p>
+    <label class="field"><span>새 선생님 비밀번호 (4자 이상)</span><input id="tp" type="password" autocomplete="new-password"></label>
+    <label class="field"><span>새 관리자 비밀번호 (4자 이상)</span><input id="mp" type="password" autocomplete="new-password"></label>
+    <button class="btn primary full" id="pinSave">저장하기</button></div>`;
+  $('#pinSave').onclick = async () => {
+    const teacherPin = $('#tp').value.trim(), masterPin = $('#mp').value.trim();
+    if (teacherPin.length < 4 || masterPin.length < 4) return toast('두 비밀번호 모두 4자 이상 입력해주세요.');
+    if (teacherPin === masterPin) return toast('선생님과 관리자 비밀번호는 달라야 해요.');
+    try { await api.setPins({ teacherPin, masterPin }); toast('비밀번호를 바꿨어요.'); $('#tp').value = ''; $('#mp').value = ''; }
+    catch (e) { console.error(e); toast('저장하지 못했어요.'); }
   };
 }
 
@@ -879,16 +1200,8 @@ function showQR(s) {
 (async function start() {
   try { api = DEMO ? demoApi() : await firebaseApi(); }
   catch (e) { console.error(e); app.innerHTML = '<div class="empty"><b>서버에 연결하지 못했어요</b>인터넷 연결을 확인하고 새로고침해주세요.</div>'; return; }
-  api.onAuth(async (u) => {
-    S.user = u;
-    if (!u) { S.profile = null; updateHeader(); return renderLogin(); }
-    app.innerHTML = '<div class="loading">불러오는 중…</div>';
-    try { S.profile = await api.getProfile(u.uid); } catch (e) { console.error(e); S.profile = null; }
-    updateHeader();
-    if (!S.profile?.number) return renderProfile(true);
-    route();
-  });
-  addEventListener('hashchange', () => { if (S.user && S.profile?.number) route(); });
+  api.onAuth((u) => { if (!S.staffLogin) enter(u); });
+  addEventListener('hashchange', () => { if (ready()) route(); });
 })();
 </script>
 </body>
