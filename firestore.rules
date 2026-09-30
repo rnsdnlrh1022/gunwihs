@@ -53,8 +53,9 @@ service cloud.firestore {
     }
 
     match /surveys/{surveyId} {
-      // 선생님 전용 설문(staffOnly)은 선생님·master만 읽을 수 있음 → 학생은 제목도, 있는지도 알 수 없음
-      allow read: if signedIn() && (resource.data.staffOnly == false || isTeacher() || isMaster());
+      // 학생은 승인된 설문(선생님 전용 제외)과 내가 만든 설문만 볼 수 있음. 선생님·master는 전부
+      allow read: if signedIn() && ((resource.data.staffOnly == false && resource.data.status == 'approved')
+        || resource.data.ownerUid == request.auth.uid || isTeacher() || isMaster());
 
       // 작성자 표시(학년·반·번호 / 선생님 이름)가 진짜 본인 정보와 같아야 올라감
       allow create: if signedIn()
@@ -67,6 +68,7 @@ service cloud.firestore {
         && request.resource.data.questions.size() <= 30
         && request.resource.data.grade in [0, 1, 2, 3, 9]
         && request.resource.data.staffOnly == (request.resource.data.grade == 9)
+        && request.resource.data.status == (hasRole() ? 'approved' : 'pending')   // 학생 설문은 승인 대기로 시작
         && (request.resource.data.staffOnly == false || isTeacher() || isMaster())
         && ((request.resource.data.ownerRole == 'student'
               && request.resource.data.ownerName is string
@@ -78,6 +80,11 @@ service cloud.firestore {
               && request.resource.data.ownerRole == roleDoc().role
               && request.resource.data.ownerLabel == roleDoc().name));
 
+      // 승인·반려: master만, 상태 관련 칸만 바꿀 수 있음
+      allow update: if isMaster()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'rejectReason', 'reviewedAt'])
+        && request.resource.data.status in ['approved', 'rejected', 'pending'];
+
       // 삭제: 만든 사람 또는 관리자
       allow delete: if signedIn() && (resource.data.ownerUid == request.auth.uid || isMaster());
 
@@ -85,6 +92,7 @@ service cloud.firestore {
       match /responses/{uid} {
         allow create: if isGoogle() && request.auth.uid == uid
           && (isTeacher() || exists(/databases/$(database)/documents/users/$(request.auth.uid)))
+          && get(/databases/$(database)/documents/surveys/$(surveyId)).data.status == 'approved'
           && (get(/databases/$(database)/documents/surveys/$(surveyId)).data.grade != 9 || isTeacher());
         allow read: if signedIn() && (
           get(/databases/$(database)/documents/surveys/$(surveyId)).data.ownerUid == request.auth.uid

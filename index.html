@@ -204,6 +204,9 @@
   .btn.sm { padding: 8px 12px; font-size: 14px; border-radius: 10px; flex: none; }
   .role-pick { width: 100%; border: 0; text-align: left; cursor: pointer; font: inherit; color: inherit; }
   .role-pick > span { font-size: 22px; color: var(--sub); }
+  .tag.warn { background: #fff4e0; color: #b25e00; }
+  .tag.bad { background: #fdecec; color: var(--red); }
+  .review { margin-top: 16px; padding: 14px 16px; border-radius: 12px; background: #fff8e1; }
   .loading { text-align: center; color: var(--sub); padding: 40px 0; }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 </style>
@@ -253,6 +256,8 @@ function toast(msg, ms = 2500) {
 const TEACHER_ONLY = 9;                                         // 대상: 선생님 전용
 const gradeLabel = (g) => (g === TEACHER_ONLY ? '선생님 전용' : g ? `${g}학년` : '전체');
 const canSeeTeacherOnly = () => S.role === 'teacher' || S.role === 'master';
+const statusOf = (s) => s.status || 'approved';   // 예전 설문(상태 없음)은 승인된 것으로 취급
+const STATUS_TAG = { pending: '<span class="tag warn">승인 대기</span>', rejected: '<span class="tag bad">반려됨</span>', approved: '' };
 const genderLabel = (g) => ({ M: '남', F: '여' }[g] || '');
 const TYPES = { single: '객관식 (하나 선택)', multi: '체크박스 (여러 개)', short: '단답형', long: '서술형', scale: '점수 (1~5)' };
 const hasOptions = (t) => t === 'single' || t === 'multi';
@@ -323,8 +328,14 @@ function demoApi() {
       save('demo:seats', seats); save('demo:users', users);
     },
     async touchLogin(uid) { const u = load('demo:users', {}); if (u[uid]) { u[uid].lastLoginAt = Date.now(); save('demo:users', u); } },
-    async listSurveys(all = true) {
-      return Object.values(load('demo:surveys', {})).filter((s) => all || !s.staffOnly).sort((a, b) => b.createdAt - a.createdAt);
+    async listSurveys(all = true, uid = '') {
+      return Object.values(load('demo:surveys', {}))
+        .filter((s) => all || (!s.staffOnly && statusOf(s) === 'approved') || s.ownerUid === uid)
+        .sort((a, b) => b.createdAt - a.createdAt);
+    },
+    async setSurveyStatus(id, status, reason = '') {
+      const all = load('demo:surveys', {}); if (!all[id]) return;
+      all[id] = { ...all[id], status, rejectReason: reason, reviewedAt: Date.now() }; save('demo:surveys', all);
     },
     async getSurvey(id, all = true) {
       const s = load('demo:surveys', {})[id] || null;
@@ -405,13 +416,21 @@ async function firebaseApi() {
       catch (e) { if (e.code === 'permission-denied') throw { code: 'seat-taken' }; throw e; }
     },
     touchLogin: (uid) => F.updateDoc(F.doc(db, 'users', uid), { lastLoginAt: F.serverTimestamp() }),
-    async listSurveys(all = true) {
+    async listSurveys(all = true, uid = '') {
       const col = F.collection(db, 'surveys');
-      const q = all ? F.query(col, F.orderBy('createdAt', 'desc'), F.limit(300))
-                    : F.query(col, F.where('staffOnly', '==', false), F.limit(300));   // 학생: 선생님 전용 제외
-      const s = await F.getDocs(q);
-      return s.docs.map(withId).sort((a, b) => b.createdAt - a.createdAt);
+      if (all) {
+        const s = await F.getDocs(F.query(col, F.orderBy('createdAt', 'desc'), F.limit(300)));
+        return s.docs.map(withId);
+      }
+      // 학생: 승인된 설문(선생님 전용 제외) + 내가 만든 설문(승인 대기·반려 포함)
+      const [a, b] = await Promise.all([
+        F.getDocs(F.query(col, F.where('staffOnly', '==', false), F.where('status', '==', 'approved'), F.limit(300))),
+        F.getDocs(F.query(col, F.where('ownerUid', '==', uid), F.limit(100)))
+      ]);
+      const m = new Map(); [...a.docs, ...b.docs].forEach((d) => m.set(d.id, withId(d)));
+      return [...m.values()].sort((x, y) => y.createdAt - x.createdAt);
     },
+    setSurveyStatus: (id, status, reason = '') => F.updateDoc(F.doc(db, 'surveys', id), { status, rejectReason: reason, reviewedAt: F.serverTimestamp() }),
     async getSurvey(id) { const s = await F.getDoc(F.doc(db, 'surveys', id)); return s.exists() ? withId(s) : null; },
     async createSurvey(d) { const r = await F.addDoc(F.collection(db, 'surveys'), { ...d, createdAt: F.serverTimestamp() }); return r.id; },
     deleteSurvey: (id) => F.deleteDoc(F.doc(db, 'surveys', id)),
@@ -449,7 +468,7 @@ async function firebaseApi() {
 /* =================================================================
    ③ 화면
 ================================================================= */
-const S = { user: null, profile: null, role: null, staffName: '', adminTab: 'students', filter: { q: '', grade: 0, tab: 'all' } };
+const S = { user: null, profile: null, role: null, staffName: '', adminTab: 'review', filter: { q: '', grade: 0, tab: 'all' } };
 let api;
 const isStaff = () => S.role === 'teacher' || S.role === 'master';
 const isMaster = () => S.role === 'master';
@@ -673,6 +692,7 @@ async function renderList() {
   const draw = () => {
     const q = f.q.trim().toLowerCase();
     const list = surveys.filter((s) =>
+      (statusOf(s) === 'approved' || s.ownerUid === S.user.uid || isMaster()) &&   // 승인 전 설문은 만든 사람·master만
       (f.tab === 'mine' ? s.ownerUid === S.user.uid : true) &&
       (s.grade !== TEACHER_ONLY || canSeeTeacherOnly()) &&          // 학생에게는 선생님 전용 설문 숨김
       (!f.grade || s.grade === f.grade || (s.grade === 0 && f.grade !== TEACHER_ONLY)) &&
@@ -694,7 +714,7 @@ async function renderList() {
     draw();
   };
   $('#q').oninput = (e) => { f.q = e.target.value; draw(); };
-  try { surveys = await api.listSurveys(canSeeTeacherOnly()); draw(); }
+  try { surveys = await api.listSurveys(canSeeTeacherOnly(), S.user.uid); draw(); }
   catch (e) { console.error(e); $('#cards').innerHTML = `<div class="empty"><b>목록을 불러오지 못했어요</b>인터넷 연결을 확인하고 새로고침해주세요.</div>`; }
 }
 function cardHtml(s) {
@@ -705,6 +725,7 @@ function cardHtml(s) {
       <h3>${esc(s.title)}</h3>
       ${s.desc ? `<p>${esc(s.desc)}</p>` : ''}
       <div class="meta">
+        ${STATUS_TAG[statusOf(s)]}
         <span class="tag blue">${gradeLabel(s.grade)}</span>
         <span class="tag">질문 ${s.questions.length}개</span>
         ${ownerText(s) ? `<span class="tag">${esc(ownerText(s))}</span>` : ''}
@@ -736,8 +757,11 @@ async function renderSurvey(id) {
   if (s.grade === TEACHER_ONLY && !isTeacher) blocked = `<b>선생님 전용 설문이에요</b><p>선생님만 응답할 수 있어요.</p>`;
   else if (s.grade >= 1 && s.grade <= 3 && isTeacher) blocked = `<b>${s.grade}학년 학생 대상 설문이에요</b><p>결과 보기에서 응답을 확인하세요.</p>`;
   else if (s.grade >= 1 && s.grade <= 3 && s.grade !== S.profile?.grade) blocked = `<b>${s.grade}학년 대상 설문이에요</b><p>내 정보의 학년이 다르면 참여할 수 없어요.</p>`;
+  const st = statusOf(s);
   let body;
-  if (mine) body = `<div class="notice"><b>참여를 완료했어요 ✓</b><p>응답은 한 번만 할 수 있어요.</p></div>`;
+  if (st === 'pending') body = `<div class="notice"><b>master 승인을 기다리는 중이에요 ⏳</b><p>승인되면 목록에 공개되고 참여할 수 있어요.</p></div>`;
+  else if (st === 'rejected') body = `<div class="notice"><b>반려된 설문이에요</b><p>${s.rejectReason ? '사유: ' + esc(s.rejectReason) : '내용을 고쳐서 새로 올려주세요.'}</p></div>`;
+  else if (mine) body = `<div class="notice"><b>참여를 완료했어요 ✓</b><p>응답은 한 번만 할 수 있어요.</p></div>`;
   else if (d.closed) body = `<div class="notice"><b>마감된 설문이에요</b><p>${esc(s.deadline)}에 마감되었어요.</p></div>`;
   else if (blocked) body = `<div class="notice">${blocked}</div>`;
   else body = `<form id="answerForm" novalidate>${s.questions.map(questionHtml).join('')}
@@ -747,6 +771,7 @@ async function renderSurvey(id) {
     <a class="back" href="#/">← 목록으로</a>
     <div class="box">
       <div class="meta" style="margin:0 0 8px">
+        ${STATUS_TAG[st]}
         <span class="tag blue">${gradeLabel(s.grade)}</span>
         <span class="tag">${s.deadline ? '마감 ' + esc(s.deadline) + ' (' + d.text + ')' : '마감일 없음'}</span>
         ${ownerText(s) ? `<span class="tag">작성 ${esc(ownerText(s))}</span>` : ''}
@@ -758,10 +783,16 @@ async function renderSurvey(id) {
         <button class="btn soft" id="qrBtn">QR 코드</button>
         ${canDelete ? '<button class="btn danger" id="delBtn">삭제</button>' : ''}
       </div>
+      ${isMaster() && st !== 'approved' ? `<div class="review">
+        <b>${st === 'pending' ? '이 설문을 공개할까요?' : '반려한 설문이에요. 다시 승인할 수도 있어요.'}</b>
+        <div class="row" style="margin-top:10px"><button class="btn primary" id="approveBtn">승인하기</button>
+        ${st === 'pending' ? '<button class="btn danger" id="rejectBtn">반려하기</button>' : ''}</div></div>` : ''}
     </div>
     ${body}`;
 
   $('#qrBtn').onclick = () => showQR(s);
+  if ($('#approveBtn')) $('#approveBtn').onclick = () => reviewSurvey(s, 'approved').then(() => renderSurvey(id));
+  if ($('#rejectBtn')) $('#rejectBtn').onclick = () => reviewSurvey(s, 'rejected').then(() => renderSurvey(id));
   if (canDelete) $('#delBtn').onclick = async () => {
     if (!confirm('이 설문을 삭제할까요? 삭제하면 되돌릴 수 없어요.')) return;
     try { await api.deleteSurvey(id); toast('삭제했어요.'); location.hash = '#/'; }
@@ -914,10 +945,11 @@ function renderBuilder() {
       const id = await api.createSurvey({
         title: draft.title, desc: draft.desc, grade: draft.grade, deadline: draft.deadline,
         questions, ownerUid: S.user.uid, staffOnly: draft.grade === TEACHER_ONLY,
+        status: isStaff() ? 'approved' : 'pending',      // 학생 설문은 master 승인 후 공개
         ...(asStudent ? { ownerRole: 'student', ownerLabel: S.profile.seat, ownerName } : { ownerRole: S.role, ownerLabel: S.staffName })
       });
       if (ownerName) { try { localStorage.setItem('ownerName', ownerName); } catch {} }
-      toast('설문을 올렸어요!');
+      toast(isStaff() ? '설문을 올렸어요!' : '설문을 보냈어요! master가 승인하면 공개돼요.', 4000);
       location.hash = '#/s/' + id;
     } catch (e) { console.error(e); toast('올리지 못했어요. 다시 시도해주세요.'); btn.disabled = false; btn.textContent = '설문 올리기'; }
   };
@@ -1001,14 +1033,15 @@ async function renderAdmin() {
   app.innerHTML = `
     <h1>master 관리</h1>
     <div class="tabs" role="tablist">
-      ${[['students', '학생'], ['surveys', '설문'], ['teachers', '선생님'], ['settings', '비밀번호']].map(([k, l]) =>
+      ${[['review', '승인 대기'], ['students', '학생'], ['surveys', '설문'], ['teachers', '선생님'], ['settings', '비밀번호']].map(([k, l]) =>
         `<button role="tab" data-a="${k}" aria-selected="${tab === k}">${l}</button>`).join('')}
     </div>
     <div id="adminBody"><div class="loading">불러오는 중…</div></div>`;
   app.querySelector('.tabs').onclick = (e) => { const b = e.target.closest('[data-a]'); if (!b) return; S.adminTab = b.dataset.a; renderAdmin(); };
   const body = $('#adminBody');
   try {
-    if (tab === 'students') await adminStudents(body);
+    if (tab === 'review') await adminReview(body);
+    else if (tab === 'students') await adminStudents(body);
     else if (tab === 'surveys') await adminSurveys(body);
     else if (tab === 'teachers') await adminTeachers(body);
     else adminSettings(body);
@@ -1078,13 +1111,48 @@ async function adminStudents(body) {
   draw();
 }
 
+// 승인·반려 공통
+async function reviewSurvey(s, status) {
+  let reason = '';
+  if (status === 'rejected') {
+    reason = prompt(`"${s.title}" 설문을 반려할까요?\n반려 사유를 적어주면 작성자에게 보여요. (비워도 돼요)`, '');
+    if (reason === null) return;
+    reason = reason.trim().slice(0, 100);
+  } else if (!confirm(`"${s.title}" 설문을 승인해서 모두에게 공개할까요?`)) return;
+  try { await api.setSurveyStatus(s.id, status, reason); toast(status === 'approved' ? '승인했어요. 이제 모두에게 보여요!' : '반려했어요.'); }
+  catch (e) { console.error(e); toast('처리하지 못했어요. 규칙이 최신인지 확인해주세요.'); }
+}
+
+async function adminReview(body) {
+  const pending = (await api.listSurveys()).filter((s) => statusOf(s) === 'pending');
+  body.innerHTML = `<p class="sub">학생이 올린 설문은 여기서 승인해야 공개돼요. 제목을 누르면 질문을 미리 볼 수 있어요.</p>
+    <div class="cards">${pending.map((s) => `
+      <div class="urow">
+        <div class="urow-main">
+          <b><a href="#/s/${esc(s.id)}">${esc(s.title)}</a></b>
+          <div class="small">작성 ${esc(ownerText(s) || '알 수 없음')} · ${fmtTime(s.createdAt)} · ${gradeLabel(s.grade)} · 질문 ${s.questions.length}개</div>
+          ${s.desc ? `<div class="small">${esc(s.desc)}</div>` : ''}
+        </div>
+        <div class="row" style="flex:none">
+          <button class="btn primary sm" data-ok="${esc(s.id)}">승인</button>
+          <button class="btn danger sm" data-no="${esc(s.id)}">반려</button>
+        </div>
+      </div>`).join('') || '<div class="empty"><b>승인을 기다리는 설문이 없어요 👍</b></div>'}</div>`;
+  body.onclick = async (e) => {
+    const ok = e.target.closest('[data-ok]'), no = e.target.closest('[data-no]');
+    const id = (ok || no)?.dataset.ok || (ok || no)?.dataset.no; if (!id) return;
+    await reviewSurvey(pending.find((x) => x.id === id), ok ? 'approved' : 'rejected');
+    renderAdmin();
+  };
+}
+
 async function adminSurveys(body) {
   const surveys = await api.listSurveys();
   body.innerHTML = `<p class="sub">전체 설문 ${surveys.length}개 · 모든 설문의 결과를 보고 삭제할 수 있어요.</p>
     <div class="cards">${surveys.map((s) => `
       <div class="urow">
         <div class="urow-main">
-          <b><a href="#/s/${esc(s.id)}">${esc(s.title)}</a></b>
+          <b><a href="#/s/${esc(s.id)}">${esc(s.title)}</a></b> ${STATUS_TAG[statusOf(s)]}
           <div class="small">작성 ${esc(ownerText(s) || '알 수 없음')} · ${fmtTime(s.createdAt)} · ${gradeLabel(s.grade)} · ${ddayInfo(s.deadline).text}</div>
           <div class="small">응답 <span data-count="${esc(s.id)}">…</span>명</div>
         </div>
