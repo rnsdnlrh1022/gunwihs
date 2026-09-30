@@ -629,7 +629,8 @@ function renderProfile(first) {
     </div></div>
     <button class="btn primary full" id="saveBtn">${first ? '시작하기' : '저장하기'}</button>
     ${first ? '<button class="btn ghost full" id="logoutBtn" style="margin-top:8px">다른 계정으로 로그인</button>'
-            : '<button class="btn ghost full" id="logoutBtn" style="margin-top:8px">로그아웃</button>'}
+            : `<button class="btn ghost full" id="logoutBtn" style="margin-top:8px">로그아웃</button>
+               <button class="btn ghost full" id="upgradeBtn" style="margin-top:4px;font-size:14px">선생님·master 권한 받기</button>`}
   </section>`;
   $('#saveBtn').onclick = async () => {
     const grade = Number(document.querySelector('input[name=grade]:checked')?.value);
@@ -650,6 +651,7 @@ function renderProfile(first) {
   };
   $('#logoutBtn').onclick = () => { if (first || confirm('로그아웃할까요?')) api.logout(); };
   if (first && $('#pickBack')) $('#pickBack').onclick = () => renderChooseRole();
+  if (!first && $('#upgradeBtn')) $('#upgradeBtn').onclick = () => renderChooseRole();
 }
 
 /* ---------- 설문 목록 ---------- */
